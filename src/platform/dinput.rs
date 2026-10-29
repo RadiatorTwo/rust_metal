@@ -17,7 +17,8 @@
 //!   attached only); none found is fine ("Joystick/joypad not found" in gunmetal.log).
 //! Only the A interface is called; the W object it is made as is the same object here.
 //!
-//! Keyboard and mouse come from the window's input (`user32`): the keys by DIK code, the
+//! Keyboard and mouse come from the window's input (`user32`): the keys by DIK code (the scan
+//! code `window` gives each key, bit 7 for extended keys such as right Ctrl and Alt), the
 //! mouse's movement since the last read and its buttons. Buffered data (GetDeviceData) is
 //! always empty for now.
 
@@ -212,50 +213,12 @@ fn get_capabilities(c: &mut Cpu) -> u32 {
     DI_OK
 }
 
-/// The DIK code of a virtual key (0: none).
-fn dik(vk: u8) -> u8 {
-    const LETTERS: [u8; 26] =
-        [0x1e, 0x30, 0x2e, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, 0x25, 0x26, 0x32, 0x31, 0x18, 0x19, 0x10, 0x13, 0x1f, 0x14, 0x16, 0x2f, 0x11, 0x2d, 0x15, 0x2c];
-    const PAD: [u8; 10] = [0x52, 0x4f, 0x50, 0x51, 0x4b, 0x4c, 0x4d, 0x47, 0x48, 0x49];
-    match vk {
-        b'A'..=b'Z' => LETTERS[(vk - b'A') as usize],
-        b'0' => 0x0b,
-        b'1'..=b'9' => 2 + vk - b'1',
-        0x60..=0x69 => PAD[(vk - 0x60) as usize],
-        0x70..=0x79 => 0x3b + vk - 0x70,
-        0x7a | 0x7b => 0x57 + vk - 0x7a,
-        0x1b => 0x01,
-        0x0d => 0x1c,
-        0x20 => 0x39,
-        0x09 => 0x0f,
-        0x08 => 0x0e,
-        // Shift, Ctrl and Alt by their halves: left, right
-        0xa0 => 0x2a,
-        0xa1 => 0x36,
-        0xa2 => 0x1d,
-        0xa3 => 0x9d,
-        0xa4 => 0x38,
-        0xa5 => 0xb8,
-        0x25 => 0xcb,
-        0x26 => 0xc8,
-        0x27 => 0xcd,
-        0x28 => 0xd0,
-        0x2d => 0xd2,
-        0x2e => 0xd3,
-        0x24 => 0xc7,
-        0x23 => 0xcf,
-        0x21 => 0xc9,
-        0x22 => 0xd1,
-        _ => 0,
-    }
-}
-
-/// The keyboard's state: 256 bytes by DIK code, 0x80 when down.
-fn keyboard_state(out: u32, size: u32) -> u32 {
+/// The keyboard's state: 256 bytes by DIK code (the window's scan codes, bit 7 for extended
+/// keys), 0x80 when down.
+pub fn keyboard_state(out: u32, size: u32) -> u32 {
     let mut s = [0u8; 256];
-    for vk in 1..=255u8 {
-        let k = dik(vk);
-        if k != 0 && super::user32::key_down(vk) {
+    for k in 0..=255u8 {
+        if super::user32::dik_down(k) {
             s[k as usize] = 0x80;
         }
     }

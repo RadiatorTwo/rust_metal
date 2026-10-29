@@ -20,6 +20,8 @@ use winit::window::{Window, WindowId};
 /// the game gave its window.
 #[derive(Clone, Copy, Debug)]
 pub enum Input {
+    /// `scan`: the set-1 scan code with bit 7 for extended keys (right Ctrl and Alt, arrows,
+    /// the block above them, keypad Enter and /), which is DirectInput's DIK code
     Key { vk: u8, scan: u8, down: bool, repeat: bool },
     Char(u8),
     Move(i32, i32),
@@ -496,8 +498,8 @@ impl ApplicationHandler for App {
     }
 }
 
-/// Windows virtual-key code and set-1 scan code for a key.
-fn vk_of(k: KeyCode) -> Option<(u8, u8)> {
+/// Windows virtual-key code and scan code (bit 7: extended, so the DIK code) for a key.
+pub fn vk_of(k: KeyCode) -> Option<(u8, u8)> {
     use KeyCode::*;
     const LETTER_SCAN: [u8; 26] =
         [0x1e, 0x30, 0x2e, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, 0x25, 0x26, 0x32, 0x31, 0x18, 0x19, 0x10, 0x13, 0x1f, 0x14, 0x16, 0x2f, 0x11, 0x2d, 0x15, 0x2c];
@@ -517,28 +519,30 @@ fn vk_of(k: KeyCode) -> Option<(u8, u8)> {
     Some(match k {
         Escape => (0x1b, 0x01),
         Enter => (0x0d, 0x1c),
-        NumpadEnter => (0x0d, 0x1c),
+        NumpadEnter => (0x0d, 0x9c),
         Space => (0x20, 0x39),
         Tab => (0x09, 0x0f),
         Backspace => (0x08, 0x0e),
         ShiftLeft => (0x10, 0x2a),
         ShiftRight => (0x10, 0x36),
-        ControlLeft | ControlRight => (0x11, 0x1d),
-        AltLeft | AltRight => (0x12, 0x38),
-        ArrowLeft => (0x25, 0x4b),
-        ArrowUp => (0x26, 0x48),
-        ArrowRight => (0x27, 0x4d),
-        ArrowDown => (0x28, 0x50),
-        Insert => (0x2d, 0x52),
-        Delete => (0x2e, 0x53),
-        Home => (0x24, 0x47),
-        End => (0x23, 0x4f),
-        PageUp => (0x21, 0x49),
-        PageDown => (0x22, 0x51),
+        ControlLeft => (0x11, 0x1d),
+        ControlRight => (0x11, 0x9d),
+        AltLeft => (0x12, 0x38),
+        AltRight => (0x12, 0xb8),
+        ArrowLeft => (0x25, 0xcb),
+        ArrowUp => (0x26, 0xc8),
+        ArrowRight => (0x27, 0xcd),
+        ArrowDown => (0x28, 0xd0),
+        Insert => (0x2d, 0xd2),
+        Delete => (0x2e, 0xd3),
+        Home => (0x24, 0xc7),
+        End => (0x23, 0xcf),
+        PageUp => (0x21, 0xc9),
+        PageDown => (0x22, 0xd1),
         NumpadAdd => (0x6b, 0x4e),
         NumpadSubtract => (0x6d, 0x4a),
         NumpadMultiply => (0x6a, 0x37),
-        NumpadDivide => (0x6f, 0x35),
+        NumpadDivide => (0x6f, 0xb5),
         NumpadDecimal => (0x6e, 0x53),
         Minus => (0xbd, 0x0c),
         Equal => (0xbb, 0x0d),

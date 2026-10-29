@@ -74,6 +74,8 @@ struct State {
     timers: Vec<Timer>,
     /// GetAsyncKeyState: bit 7 down, bit 0 pressed since the last query
     keys: [u8; 256],
+    /// keys down by DIK code (scan code, bit 7 extended), for DirectInput
+    dik: [bool; 256],
     mouse: (i32, i32),
     /// hooks: id, kind, procedure
     hooks: Vec<(u32, u32, u32)>,
@@ -88,6 +90,7 @@ static STATE: Mutex<State> = Mutex::new(State {
     queue: VecDeque::new(),
     timers: Vec::new(),
     keys: [0; 256],
+    dik: [false; 256],
     mouse: (0, 0),
     hooks: Vec::new(),
 });
@@ -114,6 +117,27 @@ pub fn mouse_pos() -> (i32, i32) {
 
 pub fn key_down(vk: u8) -> bool {
     st().keys[vk as usize] & 0x80 != 0
+}
+
+/// Whether the key of DIK code `dik` (scan code, bit 7 extended) is down.
+pub fn dik_down(dik: u8) -> bool {
+    st().dik[dik as usize]
+}
+
+/// The key state after a key event: by virtual key (GetAsyncKeyState) and by DIK code.
+fn key_state(s: &mut State, vk: u8, scan: u8, down: bool) {
+    let k = &mut s.keys[vk as usize];
+    if down {
+        *k = if *k & 0x80 == 0 { 0x81 } else { *k | 0x80 };
+    } else {
+        *k &= !0x80;
+    }
+    s.dik[scan as usize] = down;
+}
+
+/// The key state of a key event without its message (for tests).
+pub fn key_input(vk: u8, scan: u8, down: bool) {
+    key_state(&mut st(), vk, scan, down);
 }
 
 fn trace_msg() -> bool {
@@ -147,13 +171,8 @@ fn poll(wait: Duration) {
         let m = |msg, wp, lp| Msg { hwnd, msg, wp, lp };
         match i {
             Input::Key { vk, scan, down, repeat } => {
-                let k = &mut s.keys[vk as usize];
-                if down {
-                    *k = if *k & 0x80 == 0 { 0x81 } else { *k | 0x80 };
-                } else {
-                    *k &= !0x80;
-                }
-                let lp = 1 | (scan as u32) << 16 | if repeat { 1 << 30 } else { 0 } | if down { 0 } else { 3 << 30 };
+                key_state(s, vk, scan, down);
+                let lp = 1 | (scan as u32 & 0x7f) << 16 | (scan as u32 >> 7) << 24 | if repeat { 1 << 30 } else { 0 } | if down { 0 } else { 3 << 30 };
                 let sys = vk == 0x12 || key_alt(&s.keys) && vk != 0x12;
                 let msg = match (down, sys) {
                     (true, false) => WM_KEYDOWN,
@@ -185,6 +204,7 @@ fn poll(wait: Duration) {
             // games did; here it keeps running in the background. Keys held when the window
             // loses the focus would never see their release: they are let go.
             Input::Focus(false) => {
+                s.dik = [false; 256];
                 for vk in 0..256 {
                     if s.keys[vk] & 0x80 != 0 {
                         s.keys[vk] &= !0x80;
