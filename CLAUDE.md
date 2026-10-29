@@ -49,13 +49,14 @@ only the EXE here, no engine DLL.
 - `src/discover.rs`: `find_functions` finds function boundaries: recursive descent from the
   seeds through calls; then code addresses found only as numbers (vtables, callbacks) when
   `plausible`. `Program::build` then decodes each function and adds entries where code jumps
-  or calls into the middle of one. Result (2026-10-29): 9512 functions, 9793 entries (Ghidra
+  or calls into the middle of one. A function's jump tables stop decoding (MSVC puts them after calls that do not return,
+  e.g. `_exit`). Result (2026-10-30): 9506 functions, 9777 entries (Ghidra
   has 6904: the rest are callbacks and vtable entries reached only through addresses).
 - `src/lift.rs`, `src/lift/x87.rs`: x86 -> Cranelift IR (registers as variables, one block
   per instruction, tail calls between functions, `rt_lookup` for indirect targets, x87 with
   rounding modes; xlat, which the C runtime's __trandisp2 uses). Not lifted yet: MMX, 3DNow!
   and SSE (D3DX9's alternative code paths,
-  149 of 9793 entries are incomplete because of them; they compile with a stop where an
+  about 150 entries are incomplete because of them; they compile with a stop where an
   instruction is missing, which ends the run with "unsupported instruction at ..: <it>").
   CPUID (`rt::rt_cpuid`) answers a Pentium Pro (GenuineIntel family 6: FPU, TSC, CX8, CMOV;
   no MMX/SSE/3DNow!, no extended leaves) so D3DX9 takes its x87 paths (it reads the bits at
@@ -171,8 +172,13 @@ How the game starts (`GUNMETAL_TRACE_API=1` shows every import call):
    (`attract_ps_h.wmv`, skipped: white) plays and the title returns. To the main menu:
    `GUNMETAL_INPUT="16000:Enter" GUNMETAL_SHOT=shot/menu.png` (16 s leaves the title time to
    load; while `GUNMETAL_INPUT` is set the real keyboard and mouse are ignored,
-   `window::reaches_game`: only the close button and focus changes count). Starting a mission (New game, slot, Arsenal "Starten", briefing) ends at
-   "call to unknown address 0x4d5a60" (an undiscovered function; Task 11).
+   `window::reaches_game`: only the close button and focus changes count). To the first mission from a cold start (no saves; it creates
+   save slot 0, delete it afterwards): `GUNMETAL_INPUT="16000:Enter 19000:Up 20000:Enter 24000:Enter
+   28000:Enter 32000:Enter 36000:Enter 40000:Enter 44000:Enter 48000:Enter 50000:move@512,384"` (title, Up to
+   "Neues Spiel", slot, pilot ID OK, "Einsatz wählen", mission, arsenal "Starten", briefing
+   "BEREIT"; the mission runs from ~52 s). The mouse move before the mission avoids a big first mouse delta
+   (DirectInput movement comes from cursor positions). In the mission W walks, a held left
+   button fires, mouse movement aims.
    The menu's drawing: fixed function only (SetVertexShader(null)/SetPixelShader(null)); FVFs
    0x102 (XYZ|TEX1), 0x142 (XYZ|DIFFUSE|TEX1), 0x112 (XYZ|NORMAL|TEX1), 0x42 (XYZ|DIFFUSE),
    0x202, 0x152; DrawPrimitive triangle strips of 2 (quads, from a dynamic vertex buffer,

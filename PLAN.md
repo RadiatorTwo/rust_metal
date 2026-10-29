@@ -55,8 +55,34 @@ Updated 2026-10-29. Details on how things work: CLAUDE.md. Design:
 
 ## Open
 
-- [ ] Starting a mission: "call to unknown address 0x4d5a60" after the briefing (an
-      undiscovered function)
+- [x] Missions start and run (Task 11): 0x4d5a60 was missed because MSVC put a switch's
+      jump table right after a call to `_exit`; decoding ran on into the table, whose bytes
+      decode as `in`, so `plausible` rejected the function. Fix: a function's jump tables stop
+      decoding (`Func::table_bytes`; test `table_after_noreturn_call`); 9506 functions, 9777
+      entries (junk entries decoded from table bytes are gone). Seen: new game, slot, pilot ID,
+      mission choice, arsenal, briefing, the first mission "Stunde X" with HUD, radar, enemies,
+      the suit walking, turning and firing, explosions, damage; "Einsatz fehlgeschlagen" after
+      ~95 s of scripted play (with a device Reset); a save created at the pilot ID and loaded
+      after a restart. No sound (DirectSound fails; the game goes on). Not done: finishing a
+      mission (needs a human), saving after a won mission
+- [ ] Mission open points: GetLocalTime returns UTC (save times one hour off here); a
+      scripted run with a mouse move during the mission seemed to stop presenting (no
+      screenshots after ~55 s; not investigated, maybe the reverted mouse change below)
+- [ ] Mouse for real play (Task 10): tried and reverted (unverified): raw mouse motion
+      (winit DeviceEvent::MouseMotion) as DirectInput's relative axes, the cursor hidden and
+      confined while focused, so turning never stops at the display's edge; and
+      `click*ms@x,y` (held clicks) in GUNMETAL_INPUT
+- [ ] Frame rate (milestone 2; findings, unchanged): game_frame (0x45e360) ends with
+      Sleep(frame start + maxFrameTime - timeGetTime()) unless Game/variableUpdate
+      (proj_data+0x4c4) or proj_data+0x374 is set. maxFrameTime (+0x4c0) is 30 ms (~33 fps).
+      Logic is fixed-step and frame-bound: game_clock_tick (0x534e70) adds game_step_ms
+      (0x534eb0: maxFrameTime, or variableUpdateTime +0x4c8 with variableUpdate) to the game
+      time (+0x4dc) per tick; no real clock goes in, so a slow frame slows the game. With
+      variableUpdate=1 the game runs (real elapsed / variableUpdateTime) ticks per frame, at
+      most 3, of variableUpdateTime (33 ms or 1000/refresh rate) each; variableUpdate is also
+      forced on when proj_data+0x36c/+0x370 are set (0x4594b4). Settings read in game_start
+      (Game section: maxFrameTime, variableUpdate, variableUpdateTime). Uncapping: keep the
+      30 ms logic step and interpolate drawing, or run variableUpdate with a fixed step
 - [ ] Device loss (Task 7, postponed for gameplay): Alt+Tab, Win+D, lock screen (Win+L).
       The game's path: frame_begin (0x46f590) asks TestCooperativeLevel every frame; at the
       first answer that is not D3D_OK d3d_lost_release (0x46f190) releases the event query and

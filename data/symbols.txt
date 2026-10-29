@@ -165,7 +165,16 @@
 0x655694 video_player         the current video player
 0x726b08 kb_device            the keyboard's IDirectInputDevice7A (its IDirectInput7A at 0x726b0c)
 0x726b28 mouse_device         the mouse's IDirectInputDevice7A (its IDirectInput7A at 0x726b2c, state at 0x726b14)
-0x72a458 proj_data            the project's data (getProjData(): error strings at +0x8d8, settings at +0x35c)
+0x72a458 proj_data            the project's data (getProjData(): error strings at +0x8d8, settings at +0x35c; Game settings maxFrameTime +0x4c0, variableUpdate +0x4c4, variableUpdateTime +0x4c8, frame step +0x4cc, game time +0x4dc)
+
+# Game loop and time (Task 11; PLAN.md "Frame rate")
+0x45e360 game_frame           one frame: logic ticks (game_clock_tick and the world update; with variableUpdate up to 3 per frame), drawing, then, unless variableUpdate or proj_data+0x374, Sleep(frame start + maxFrameTime - timeGetTime()) at 0x45fe7c
+0x534e40 game_clock_reset     game time (proj_data+0x4dc) to 0
+0x534e70 game_clock_tick      game time += game_step_ms (a fixed step; the real clock plays no part), previous time at 0x72a768, the difference at 0x72a660
+0x534eb0 game_step_ms         variableUpdateTime (proj_data+0x4c8) with variableUpdate (+0x4c4), else maxFrameTime (+0x4c0, 30)
+0x534ed0 game_time_ms         proj_data+0x4dc
+0x534ee0 frame_step_ms        proj_data+0x4cc: the game time this frame advances (maxFrameTime, or variableUpdateTime times the ticks)
+0x4d5a60 sub_4d5a60           found by discovery since Task 11 (a jump table after a call to _exit): a vtable method (0x5e81bc); switch on a 1..4 state at [arg+4]
 
 # MFC
 0x406130 CRect
