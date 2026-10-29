@@ -53,7 +53,8 @@ only the EXE here, no engine DLL.
   has 6904: the rest are callbacks and vtable entries reached only through addresses).
 - `src/lift.rs`, `src/lift/x87.rs`: x86 -> Cranelift IR (registers as variables, one block
   per instruction, tail calls between functions, `rt_lookup` for indirect targets, x87 with
-  rounding modes). Not lifted yet: MMX, 3DNow! and SSE (D3DX9's alternative code paths,
+  rounding modes; xlat, which the C runtime's __trandisp2 uses). Not lifted yet: MMX, 3DNow!
+  and SSE (D3DX9's alternative code paths,
   149 of 9793 entries are incomplete because of them; they compile with a stop where an
   instruction is missing, which ends the run with "unsupported instruction at ..: <it>").
   CPUID (`rt::rt_cpuid`) answers a Pentium Pro (GenuineIntel family 6: FPU, TSC, CX8, CMOV;
@@ -110,11 +111,20 @@ positions its back buffer's pixels (`window::set_game_size`) until a Reset to wi
 modes, so when the adapter has none, R5G6B5 modes are offered as the X8R8G8B8 ones and
 R5G6B5 as a display format means X8R8G8B8 in the checks and as a fullscreen back buffer in
 CreateDevice/Reset (`host_back_buffer_format`; the game sees its own format back). Without that: "Nicht unterstützte
-Grafikkarte.". `resources.rs`: textures, surfaces of textures, vertex and index buffers,
-queries (what the game creates right after CreateDevice); locks give a guest buffer
-(`com::shadow`; a buffer's covers it whole) with the host's pitch, locks nest per object and
-level, a part of a surface of unknown format is refused, copied in unless D3DLOCK_DISCARD and out at the unlock
-unless D3DLOCK_READONLY. Shaders: only "none" goes through. `shot.rs`: `GUNMETAL_SHOT`.
+Grafikkarte.". `resources.rs`: textures, cube textures, surfaces, vertex and index buffers,
+queries, vertex declarations (the D3DVERTEXELEMENT9 array copied to its end marker), vertex
+and pixel shaders (the game's bytecode as it is, assembled by its own D3DX9), state blocks.
+Locks give a guest buffer (`com::shadow`) with the host's pitch, one per object and level (a
+cube face's level its own): a buffer's covers the whole buffer, a texture level's the whole
+level, and a lock's range or rect is at its offset, so nested locks share it; a part of a
+surface of unknown format is refused. Copied in unless D3DLOCK_DISCARD (`lock_copy_in`), out
+at the unlock unless D3DLOCK_READONLY. Buffers keep their guest copy between locks: only bytes
+it never held are read from the host (the game's dynamic buffers are write-only in the default
+pool and locked with NOOVERWRITE hundreds of times a second; reading write-combined memory back
+would be slow), ProcessVertices makes it stale (`resources::stale`). Textures and surfaces are
+read at every lock. Every device method the game calls goes through; *UP draws hand D3D9 the
+game's arrays in place after a check that they are committed guest memory. Not implemented:
+swap chains, volume textures, patches, GetNPatchMode, GetDC. `shot.rs`: `GUNMETAL_SHOT`.
 
 Paths: the game uses paths relative to its folder ("data\init.ini"); `host_path` makes a
 guest path absolute against the current folder (at start `INSTALL_DIR`, C:\Spiele\Gun Metal,
@@ -150,11 +160,31 @@ How the game starts (`GUNMETAL_TRACE_API=1` shows every import call):
    (video_start 0x4174a0; `dshow.rs` has the details): Extras/VideoMethod is 1, so the
    videotexture player (filter graph, AddSourceFilter, the game's own "TEXTURERENDERER"
    filter, IMediaEvent) plays "cgplayed_01_h.wmv", "intro1_ps_h.wmv", "intro2_ps_h.wmv", each
-   ending at once (one Present each, black: the game draws the video quad with
+   ending at once (one Present each, white: the game draws the video quad with
    DrawPrimitive). Then the front end: Clear (depth and stencil only), DrawIndexedPrimitive,
-   Present, its textures. **The run ends here now**: IDirect3DDevice9::CreateCubeTexture (not
-   implemented: the game reads the null texture, a fault in 0x480d90). DrawPrimitive and
-   DrawIndexedPrimitive are not implemented yet either, so every frame so far is black.
+   Present, its textures. The front end (as of Task 6): a white frame per intro video (the
+   video quad without a video), then the door-opening transition, the title screen (frame with
+   the rotating 3D "GUN METAL" logo, version "V1.09.1.1" top right) at ~3.5 s, and after a key
+   the main menu: "Neues Spiel", "Spiel laden", "Spiel löschen", "Gun Metal beenden" on the
+   turning globe, inside the same frame as the manual's screenshots
+   (`game_files/Manual/Files/Images/Screens`). After ~40 s on the title the attract video
+   (`attract_ps_h.wmv`, skipped: white) plays and the title returns. To the main menu:
+   `GUNMETAL_INPUT="16000:Enter" GUNMETAL_SHOT=shot/menu.png` (16 s leaves the title time to
+   load; real mouse and keyboard input still reaches the game during scripted runs, so leave
+   the machine alone). Starting a mission (New game, slot, Arsenal "Starten", briefing) ends at
+   "call to unknown address 0x4d5a60" (an undiscovered function; Task 11).
+   The menu's drawing: fixed function only (SetVertexShader(null)/SetPixelShader(null)); FVFs
+   0x102 (XYZ|TEX1), 0x142 (XYZ|DIFFUSE|TEX1), 0x112 (XYZ|NORMAL|TEX1), 0x42 (XYZ|DIFFUSE),
+   0x202, 0x152; DrawPrimitive triangle strips of 2 (quads, from a dynamic vertex buffer,
+   0x478650) and DrawIndexedPrimitive triangle lists (dynamic buffers 0x478760, meshes
+   0x4727f0); per frame Clear(Z and stencil only, 0xff000080), BeginScene, EndScene, Present.
+   Textures: DXT1, DXT3 and A8R8G8B8, managed; cube textures DXT1 (4x4 and 64x64 with 7
+   levels, managed). Dynamic buffers: two vertex buffers (FVF 0x202 and 0x144) and one 16-bit
+   index buffer, usage DYNAMIC|WRITEONLY in the default pool, locked NOOVERWRITE and DISCARD when
+   full (0x4781c0, 0x4783b0); static buffers managed. At start-up the game makes one vertex
+   shader with a declaration (0x4790b0) and one pixel shader (0x479890), assembled by its
+   D3DX9 (which asks d3d9.dll for Direct3DShaderValidatorCreate9: not there, it goes on), sets
+   the vertex shader once (0x47c3f0) and then draws without shaders.
 3. Registry: the game reads none (its settings are data\init.ini and data\persist.dat); D3DX9
    asks HKLM\Software\Microsoft\Direct3D for debug switches (DisableMMX), which do not exist.
    `registry.txt` holds only our own settings (key HKLM\SOFTWARE\Rage\Gun Metal) and is written

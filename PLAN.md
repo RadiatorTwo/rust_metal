@@ -43,16 +43,24 @@ Updated 2026-10-29. Details on how things work: CLAUDE.md. Design:
       settings choose, and VMR9, in an experiment with video_use_vmr9 forced true) were seen
       passing (tests `tests/dshow.rs`)
 
+- [x] Front end drawn (Task 6): cube textures, render targets and other device surfaces,
+      vertex declarations, shaders (bytecode as it is), state blocks, every device method the
+      front end calls, *UP draws in place; texture locks share one guest buffer per level;
+      buffers keep their guest copy between locks (no read-back of write-only buffers);
+      `xlat` lifted. The title screen and the main menu look like the manual's screenshots
+      and the game idles in the menu (tests `tests/d3d9_lock.rs`, `tests/misc.rs`)
+
 ## Open
 
-- [ ] Front end: the run ends at IDirect3DDevice9::CreateCubeTexture (not implemented, the
-      game faults on the null texture); DrawPrimitive and DrawIndexedPrimitive are called but
-      not implemented (frames are black)
+- [ ] Starting a mission: "call to unknown address 0x4d5a60" after the briefing (an
+      undiscovered function)
+- [ ] Scripted runs: real mouse and keyboard input still reaches the game (a run can wander
+      off when someone uses the machine)
 - [ ] DirectInput: buffered keyboard data (GetDeviceData; the game uses it for short presses),
       joysticks (gamepads), the exclusive mouse's relative movement at the window's edge
 - [ ] Videos (`.wmv`) and music: the graph skips them now (`dshow.rs`)
-- [ ] Direct3D 9 still open: shaders, vertex declarations, render targets and other device
-      surfaces, cube/volume textures, state blocks, GetAdapterMonitor
+- [ ] Direct3D 9 still open: volume textures, swap chains, GetDC, GetAdapterMonitor (none
+      called by the front end)
 - [ ] DirectSound (`dsound.rs`: DirectSoundCreate8 says "no device" now)
 - [ ] Imports bound to "not implemented" (stop when called): CreateProcessA,
       EnumSystemLocalesA, CreateFileW, CreateFileMappingA, MapViewOfFile, UnmapViewOfFile

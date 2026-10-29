@@ -1,9 +1,11 @@
 //! IDirect3DDevice9: the game's calls go to the system's device. All 119 methods are in the
 //! guest vtable in the SDK's order; those that hold only values or structures of the same
-//! layout pass straight through, the present parameters are converted (`types`), textures,
-//! buffers and queries are wrapped (`resources`), and what is not implemented yet (shaders,
-//! vertex declarations, render targets and other surfaces of the device, state blocks)
-//! returns 0 and is logged at its first call.
+//! layout pass straight through, the present parameters are converted (`types`), and every
+//! interface the device creates or hands out is wrapped (`resources`): textures, cube
+//! textures, surfaces, buffers, queries, vertex declarations, shaders, state blocks. *UP draws
+//! give D3D9 the game's own arrays (guest memory is host memory). What is not implemented
+//! (swap chains, volume textures, patches, GetNPatchMode, which returns a float) returns 0 and
+//! is logged at its first call.
 //!
 //! `GUNMETAL_SHOT=file.png`: the back buffer is written there before Present (see `shot`).
 
@@ -201,25 +203,6 @@ fn create_query(c: &mut Cpu) -> u32 {
     resources::created(r, q, resources::QUERY, out, "CreateQuery")
 }
 
-/// Shaders are not wrapped yet: only "no shader" (the fixed-function pipeline) goes through.
-fn set_vertex_shader(c: &mut Cpu) -> u32 {
-    if arg(c, 1) != 0 {
-        log!("warn: SetVertexShader with a shader: not implemented");
-        return 0;
-    }
-    let (p, v) = dv(c);
-    hr(unsafe { (v.SetVertexShader)(p, std::ptr::null_mut()) })
-}
-
-fn set_pixel_shader(c: &mut Cpu) -> u32 {
-    if arg(c, 1) != 0 {
-        log!("warn: SetPixelShader with a shader: not implemented");
-        return 0;
-    }
-    let (p, v) = dv(c);
-    hr(unsafe { (v.SetPixelShader)(p, std::ptr::null_mut()) })
-}
-
 pass!(set_texture, SetTexture, |c| (arg(c, 1), resources::host_of(arg(c, 2))));
 pass!(set_stream_source, SetStreamSource, |c| (arg(c, 1), resources::host_of(arg(c, 2)), arg(c, 3), arg(c, 4)));
 pass!(set_indices, SetIndices, |c| (resources::host_of(arg(c, 1))));
@@ -228,6 +211,261 @@ pass!(set_palette_entries, SetPaletteEntries, |c| (arg(c, 1), cp(arg(c, 2))));
 pass!(get_palette_entries, GetPaletteEntries, |c| (arg(c, 1), gp(arg(c, 2))));
 pass!(set_current_texture_palette, SetCurrentTexturePalette, |c| (arg(c, 1)));
 pass!(get_current_texture_palette, GetCurrentTexturePalette, |c| (gp(arg(c, 1))));
+
+// SetCursorProperties(x hotspot, y hotspot, surface)
+pass!(set_cursor_properties, SetCursorProperties, |c| (arg(c, 1), arg(c, 2), resources::host_of(arg(c, 3))));
+
+/// A host interface the device hands out (`get` fills it) into the game's out pointer at
+/// `out`; `wrap` finds or makes its guest object. Null out of D3D9 gives 0 and its result.
+fn handed_out(c: &Cpu, out: u32, what: &str, wrap: impl FnOnce(*mut c_void) -> u32, get: impl FnOnce(*mut c_void, &'static IDirect3DDevice9_Vtbl, *mut *mut c_void) -> windows::core::HRESULT) -> u32 {
+    let (p, v) = dv(c);
+    let mut o: *mut c_void = std::ptr::null_mut();
+    let r = get(p, v, &mut o);
+    if r.is_err() || o.is_null() {
+        if r.is_err() {
+            log!("warn: {what} failed: {:#x}", r.0);
+        }
+        mem().wr32(out, 0);
+        return hr(r);
+    }
+    mem().wr32(out, wrap(o));
+    0
+}
+
+fn surface(h: *mut c_void) -> u32 {
+    com::wrap(resources::SURFACE, h)
+}
+
+/// GetBackBuffer(swap chain, index, type, out).
+fn get_back_buffer(c: &mut Cpu) -> u32 {
+    let (sc, i, ty) = (arg(c, 1), arg(c, 2), arg(c, 3));
+    handed_out(c, arg(c, 4), "GetBackBuffer", surface, |p, v, o| unsafe { (v.GetBackBuffer)(p, sc, i, D3DBACKBUFFER_TYPE(ty as i32), o) })
+}
+
+/// CreateCubeTexture(edge, levels, usage, format, pool, out, shared handle).
+fn create_cube_texture(c: &mut Cpu) -> u32 {
+    let (p, v) = dv(c);
+    let a = |k| arg(c, k);
+    let mut t: *mut c_void = std::ptr::null_mut();
+    let r = unsafe { (v.CreateCubeTexture)(p, a(1), a(2), a(3), D3DFORMAT(a(4)), D3DPOOL(a(5) as i32), &mut t, std::ptr::null_mut()) };
+    resources::created(r, t, resources::CUBE_TEXTURE, a(6), "CreateCubeTexture")
+}
+
+/// CreateRenderTarget(w, h, format, multisample, quality, lockable, out, shared handle).
+fn create_render_target(c: &mut Cpu) -> u32 {
+    let (p, v) = dv(c);
+    let a = |k| arg(c, k);
+    let mut s: *mut c_void = std::ptr::null_mut();
+    let r = unsafe {
+        (v.CreateRenderTarget)(p, a(1), a(2), D3DFORMAT(a(3)), D3DMULTISAMPLE_TYPE(a(4) as i32), a(5), BOOL(a(6) as i32), &mut s, std::ptr::null_mut())
+    };
+    resources::created(r, s, resources::SURFACE, a(7), "CreateRenderTarget")
+}
+
+/// CreateDepthStencilSurface(w, h, format, multisample, quality, discard, out, shared handle).
+fn create_depth_stencil_surface(c: &mut Cpu) -> u32 {
+    let (p, v) = dv(c);
+    let a = |k| arg(c, k);
+    let mut s: *mut c_void = std::ptr::null_mut();
+    let r = unsafe {
+        (v.CreateDepthStencilSurface)(p, a(1), a(2), D3DFORMAT(a(3)), D3DMULTISAMPLE_TYPE(a(4) as i32), a(5), BOOL(a(6) as i32), &mut s, std::ptr::null_mut())
+    };
+    resources::created(r, s, resources::SURFACE, a(7), "CreateDepthStencilSurface")
+}
+
+/// CreateOffscreenPlainSurface(w, h, format, pool, out, shared handle).
+fn create_offscreen_plain_surface(c: &mut Cpu) -> u32 {
+    let (p, v) = dv(c);
+    let a = |k| arg(c, k);
+    let mut s: *mut c_void = std::ptr::null_mut();
+    let r = unsafe { (v.CreateOffscreenPlainSurface)(p, a(1), a(2), D3DFORMAT(a(3)), D3DPOOL(a(4) as i32), &mut s, std::ptr::null_mut()) };
+    resources::created(r, s, resources::SURFACE, a(5), "CreateOffscreenPlainSurface")
+}
+
+use resources::host_of as h;
+
+// Copies between surfaces and textures: the destination is never a buffer, so no kept guest
+// copy goes stale (textures and surfaces are copied in at every lock).
+pass!(update_surface, UpdateSurface, |c| (h(arg(c, 1)), cp(arg(c, 2)), h(arg(c, 3)), cp(arg(c, 4))));
+pass!(update_texture, UpdateTexture, |c| (h(arg(c, 1)), h(arg(c, 2))));
+pass!(get_render_target_data, GetRenderTargetData, |c| (h(arg(c, 1)), h(arg(c, 2))));
+pass!(get_front_buffer_data, GetFrontBufferData, |c| (arg(c, 1), h(arg(c, 2))));
+pass!(stretch_rect, StretchRect, |c| (h(arg(c, 1)), cp(arg(c, 2)), h(arg(c, 3)), cp(arg(c, 4)), D3DTEXTUREFILTERTYPE(arg(c, 5) as i32)));
+pass!(color_fill, ColorFill, |c| (h(arg(c, 1)), cp(arg(c, 2)), arg(c, 3)));
+pass!(set_render_target, SetRenderTarget, |c| (arg(c, 1), h(arg(c, 2))));
+pass!(set_depth_stencil_surface, SetDepthStencilSurface, |c| (h(arg(c, 1))));
+
+fn get_render_target(c: &mut Cpu) -> u32 {
+    let i = arg(c, 1);
+    handed_out(c, arg(c, 2), "GetRenderTarget", surface, |p, v, o| unsafe { (v.GetRenderTarget)(p, i, o) })
+}
+
+fn get_depth_stencil_surface(c: &mut Cpu) -> u32 {
+    handed_out(c, arg(c, 1), "GetDepthStencilSurface", surface, |p, v, o| unsafe { (v.GetDepthStencilSurface)(p, o) })
+}
+
+// ---- state blocks ----
+
+fn create_state_block(c: &mut Cpu) -> u32 {
+    let (p, v) = dv(c);
+    let mut b: *mut c_void = std::ptr::null_mut();
+    let r = unsafe { (v.CreateStateBlock)(p, D3DSTATEBLOCKTYPE(arg(c, 1) as i32), &mut b) };
+    resources::created(r, b, resources::STATE_BLOCK, arg(c, 2), "CreateStateBlock")
+}
+
+pass!(begin_state_block, BeginStateBlock, |c| ());
+
+fn end_state_block(c: &mut Cpu) -> u32 {
+    let (p, v) = dv(c);
+    let mut b: *mut c_void = std::ptr::null_mut();
+    let r = unsafe { (v.EndStateBlock)(p, &mut b) };
+    resources::created(r, b, resources::STATE_BLOCK, arg(c, 1), "EndStateBlock")
+}
+
+fn get_texture(c: &mut Cpu) -> u32 {
+    let stage = arg(c, 1);
+    handed_out(c, arg(c, 2), "GetTexture", resources::wrap_base_texture, |p, v, o| unsafe { (v.GetTexture)(p, stage, o) })
+}
+
+// ---- drawing ----
+
+pass!(draw_primitive, DrawPrimitive, |c| (D3DPRIMITIVETYPE(arg(c, 1) as i32), arg(c, 2), arg(c, 3)));
+pass!(draw_indexed_primitive, DrawIndexedPrimitive, |c| (D3DPRIMITIVETYPE(arg(c, 1) as i32), arg(c, 2) as i32, arg(c, 3), arg(c, 4), arg(c, 5), arg(c, 6)));
+
+/// Whether guest bytes [a, a + n) are committed memory D3D9 can read (the game's *UP arrays
+/// are on its heap or stack, so this holds; a bad pointer is refused instead of faulting
+/// inside d3d9.dll).
+fn guest_readable(a: u32, n: u32) -> bool {
+    use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEMORY_BASIC_INFORMATION, VirtualQuery};
+    let (mut at, end) = (a as u64, a as u64 + n as u64);
+    while at < end {
+        let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        let p = unsafe { mem().base.add(at as usize) };
+        if unsafe { VirtualQuery(p as _, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } == 0 || mbi.State != MEM_COMMIT {
+            return false;
+        }
+        at = (mbi.BaseAddress as u64 - mem().base as u64) + mbi.RegionSize as u64;
+    }
+    true
+}
+
+/// A *UP draw's arrays not all in guest memory: logged, D3DERR_INVALIDCALL.
+fn up_refused(what: &str, a: u32, n: u32) -> bool {
+    if guest_readable(a, n) {
+        return false;
+    }
+    log!("warn: {what}: {n} bytes at {a:#x} not in guest memory (D3DERR_INVALIDCALL)");
+    true
+}
+
+/// DrawPrimitiveUP(type, count, vertices, stride): D3D9 reads the vertices where the game has
+/// them (guest memory is host memory).
+fn draw_primitive_up(c: &mut Cpu) -> u32 {
+    let (p, v) = dv(c);
+    let (ty, count, data, stride) = (arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4));
+    if up_refused("DrawPrimitiveUP", data, resources::primitive_vertices(ty, count).saturating_mul(stride)) {
+        return resources::D3DERR_INVALIDCALL;
+    }
+    hr(unsafe { (v.DrawPrimitiveUP)(p, D3DPRIMITIVETYPE(ty as i32), count, cp(data), stride) })
+}
+
+/// DrawIndexedPrimitiveUP(type, min index, vertex count, primitive count, indices, index
+/// format, vertices, stride).
+fn draw_indexed_primitive_up(c: &mut Cpu) -> u32 {
+    let (p, v) = dv(c);
+    let a = |k| arg(c, k);
+    let (ty, min, nv, count, idx, fmt, data, stride) = (a(1), a(2), a(3), a(4), a(5), a(6), a(7), a(8));
+    // D3DFMT_INDEX16 101, D3DFMT_INDEX32 102
+    let index_bytes = resources::primitive_vertices(ty, count).saturating_mul(if fmt == 102 { 4 } else { 2 });
+    if up_refused("DrawIndexedPrimitiveUP indices", idx, index_bytes)
+        || up_refused("DrawIndexedPrimitiveUP vertices", data, min.saturating_add(nv).saturating_mul(stride))
+    {
+        return resources::D3DERR_INVALIDCALL;
+    }
+    hr(unsafe { (v.DrawIndexedPrimitiveUP)(p, D3DPRIMITIVETYPE(ty as i32), min, nv, count, cp(idx), D3DFORMAT(fmt), cp(data), stride) })
+}
+
+/// ProcessVertices(source start, destination index, count, destination buffer, declaration,
+/// flags): the GPU writes the buffer, whose kept guest copy is stale then.
+fn process_vertices(c: &mut Cpu) -> u32 {
+    let (p, v) = dv(c);
+    let a = |k| arg(c, k);
+    resources::stale(a(4));
+    hr(unsafe { (v.ProcessVertices)(p, a(1), a(2), a(3), h(a(4)), h(a(5)), a(6)) })
+}
+
+// ---- vertex declarations and shaders ----
+
+/// CreateVertexDeclaration(elements, out): the array copied up to its end marker.
+fn create_vertex_declaration(c: &mut Cpu) -> u32 {
+    let (p, v) = dv(c);
+    let elements = resources::vertex_elements(arg(c, 1));
+    let mut d: *mut c_void = std::ptr::null_mut();
+    let r = unsafe { (v.CreateVertexDeclaration)(p, elements.as_ptr(), &mut d) };
+    resources::created(r, d, resources::VERTEX_DECLARATION, arg(c, 2), "CreateVertexDeclaration")
+}
+
+pass!(set_vertex_declaration, SetVertexDeclaration, |c| (h(arg(c, 1))));
+
+fn get_vertex_declaration(c: &mut Cpu) -> u32 {
+    handed_out(c, arg(c, 1), "GetVertexDeclaration", |o| com::wrap(resources::VERTEX_DECLARATION, o), |p, v, o| unsafe { (v.GetVertexDeclaration)(p, o) })
+}
+
+/// CreateVertexShader(bytecode, out): the game's bytecode (from its D3DX9) as it is; D3D9
+/// reads it to its end token.
+fn create_vertex_shader(c: &mut Cpu) -> u32 {
+    let (p, v) = dv(c);
+    let mut s: *mut c_void = std::ptr::null_mut();
+    let r = unsafe { (v.CreateVertexShader)(p, cp(arg(c, 1)), &mut s) };
+    resources::created(r, s, resources::VERTEX_SHADER, arg(c, 2), "CreateVertexShader")
+}
+
+fn create_pixel_shader(c: &mut Cpu) -> u32 {
+    let (p, v) = dv(c);
+    let mut s: *mut c_void = std::ptr::null_mut();
+    let r = unsafe { (v.CreatePixelShader)(p, cp(arg(c, 1)), &mut s) };
+    resources::created(r, s, resources::PIXEL_SHADER, arg(c, 2), "CreatePixelShader")
+}
+
+pass!(set_vertex_shader, SetVertexShader, |c| (h(arg(c, 1))));
+pass!(set_pixel_shader, SetPixelShader, |c| (h(arg(c, 1))));
+
+fn get_vertex_shader(c: &mut Cpu) -> u32 {
+    handed_out(c, arg(c, 1), "GetVertexShader", |o| com::wrap(resources::VERTEX_SHADER, o), |p, v, o| unsafe { (v.GetVertexShader)(p, o) })
+}
+
+fn get_pixel_shader(c: &mut Cpu) -> u32 {
+    handed_out(c, arg(c, 1), "GetPixelShader", |o| com::wrap(resources::PIXEL_SHADER, o), |p, v, o| unsafe { (v.GetPixelShader)(p, o) })
+}
+
+// constants (start register, data, count): floats, ints and BOOLs of 4 bytes, the same layout
+pass!(set_vs_const_f, SetVertexShaderConstantF, |c| (arg(c, 1), cp(arg(c, 2)), arg(c, 3)));
+pass!(get_vs_const_f, GetVertexShaderConstantF, |c| (arg(c, 1), gp(arg(c, 2)), arg(c, 3)));
+pass!(set_vs_const_i, SetVertexShaderConstantI, |c| (arg(c, 1), cp(arg(c, 2)), arg(c, 3)));
+pass!(get_vs_const_i, GetVertexShaderConstantI, |c| (arg(c, 1), gp(arg(c, 2)), arg(c, 3)));
+pass!(set_vs_const_b, SetVertexShaderConstantB, |c| (arg(c, 1), cp(arg(c, 2)), arg(c, 3)));
+pass!(get_vs_const_b, GetVertexShaderConstantB, |c| (arg(c, 1), gp(arg(c, 2)), arg(c, 3)));
+pass!(set_ps_const_f, SetPixelShaderConstantF, |c| (arg(c, 1), cp(arg(c, 2)), arg(c, 3)));
+pass!(get_ps_const_f, GetPixelShaderConstantF, |c| (arg(c, 1), gp(arg(c, 2)), arg(c, 3)));
+pass!(set_ps_const_i, SetPixelShaderConstantI, |c| (arg(c, 1), cp(arg(c, 2)), arg(c, 3)));
+pass!(get_ps_const_i, GetPixelShaderConstantI, |c| (arg(c, 1), gp(arg(c, 2)), arg(c, 3)));
+pass!(set_ps_const_b, SetPixelShaderConstantB, |c| (arg(c, 1), cp(arg(c, 2)), arg(c, 3)));
+pass!(get_ps_const_b, GetPixelShaderConstantB, |c| (arg(c, 1), gp(arg(c, 2)), arg(c, 3)));
+
+// ---- streams ----
+
+/// GetStreamSource(stream, out buffer, out offset, out stride).
+fn get_stream_source(c: &mut Cpu) -> u32 {
+    let (s, off, stride) = (arg(c, 1), arg(c, 3), arg(c, 4));
+    handed_out(c, arg(c, 2), "GetStreamSource", |o| com::wrap(resources::VERTEX_BUFFER, o), |p, v, o| unsafe { (v.GetStreamSource)(p, s, o, gp(off), gp(stride)) })
+}
+
+pass!(set_stream_source_freq, SetStreamSourceFreq, |c| (arg(c, 1), arg(c, 2)));
+pass!(get_stream_source_freq, GetStreamSourceFreq, |c| (arg(c, 1), gp(arg(c, 2))));
+
+fn get_indices(c: &mut Cpu) -> u32 {
+    handed_out(c, arg(c, 1), "GetIndices", |o| com::wrap(resources::INDEX_BUFFER, o), |p, v, o| unsafe { (v.GetIndices)(p, o) })
+}
 
 /// IDirect3DDevice9, in the SDK's order (119 methods).
 pub static METHODS: &[Import] = &[
@@ -241,7 +479,7 @@ pub static METHODS: &[Import] = &[
     ("IDirect3DDevice9::GetDeviceCaps", 2, get_device_caps),
     ("IDirect3DDevice9::GetDisplayMode", 3, get_display_mode),
     ("IDirect3DDevice9::GetCreationParameters", 2, get_creation_parameters),
-    ("IDirect3DDevice9::SetCursorProperties", 4, NI),
+    ("IDirect3DDevice9::SetCursorProperties", 4, set_cursor_properties),
     ("IDirect3DDevice9::SetCursorPosition", 4, set_cursor_position),
     ("IDirect3DDevice9::ShowCursor", 2, show_cursor),
     ("IDirect3DDevice9::CreateAdditionalSwapChain", 3, NI),
@@ -249,29 +487,29 @@ pub static METHODS: &[Import] = &[
     ("IDirect3DDevice9::GetNumberOfSwapChains", 1, get_number_of_swap_chains),
     ("IDirect3DDevice9::Reset", 2, reset),
     ("IDirect3DDevice9::Present", 5, present),
-    ("IDirect3DDevice9::GetBackBuffer", 5, NI),
+    ("IDirect3DDevice9::GetBackBuffer", 5, get_back_buffer),
     ("IDirect3DDevice9::GetRasterStatus", 3, get_raster_status),
     ("IDirect3DDevice9::SetDialogBoxMode", 2, set_dialog_box_mode),
     ("IDirect3DDevice9::SetGammaRamp", 4, set_gamma_ramp),
     ("IDirect3DDevice9::GetGammaRamp", 3, get_gamma_ramp),
     ("IDirect3DDevice9::CreateTexture", 9, create_texture),
     ("IDirect3DDevice9::CreateVolumeTexture", 10, NI),
-    ("IDirect3DDevice9::CreateCubeTexture", 8, NI),
+    ("IDirect3DDevice9::CreateCubeTexture", 8, create_cube_texture),
     ("IDirect3DDevice9::CreateVertexBuffer", 7, create_vertex_buffer),
     ("IDirect3DDevice9::CreateIndexBuffer", 7, create_index_buffer),
-    ("IDirect3DDevice9::CreateRenderTarget", 9, NI),
-    ("IDirect3DDevice9::CreateDepthStencilSurface", 9, NI),
-    ("IDirect3DDevice9::UpdateSurface", 5, NI),
-    ("IDirect3DDevice9::UpdateTexture", 3, NI),
-    ("IDirect3DDevice9::GetRenderTargetData", 3, NI),
-    ("IDirect3DDevice9::GetFrontBufferData", 3, NI),
-    ("IDirect3DDevice9::StretchRect", 6, NI),
-    ("IDirect3DDevice9::ColorFill", 4, NI),
-    ("IDirect3DDevice9::CreateOffscreenPlainSurface", 7, NI),
-    ("IDirect3DDevice9::SetRenderTarget", 3, NI),
-    ("IDirect3DDevice9::GetRenderTarget", 3, NI),
-    ("IDirect3DDevice9::SetDepthStencilSurface", 2, NI),
-    ("IDirect3DDevice9::GetDepthStencilSurface", 2, NI),
+    ("IDirect3DDevice9::CreateRenderTarget", 9, create_render_target),
+    ("IDirect3DDevice9::CreateDepthStencilSurface", 9, create_depth_stencil_surface),
+    ("IDirect3DDevice9::UpdateSurface", 5, update_surface),
+    ("IDirect3DDevice9::UpdateTexture", 3, update_texture),
+    ("IDirect3DDevice9::GetRenderTargetData", 3, get_render_target_data),
+    ("IDirect3DDevice9::GetFrontBufferData", 3, get_front_buffer_data),
+    ("IDirect3DDevice9::StretchRect", 6, stretch_rect),
+    ("IDirect3DDevice9::ColorFill", 4, color_fill),
+    ("IDirect3DDevice9::CreateOffscreenPlainSurface", 7, create_offscreen_plain_surface),
+    ("IDirect3DDevice9::SetRenderTarget", 3, set_render_target),
+    ("IDirect3DDevice9::GetRenderTarget", 3, get_render_target),
+    ("IDirect3DDevice9::SetDepthStencilSurface", 2, set_depth_stencil_surface),
+    ("IDirect3DDevice9::GetDepthStencilSurface", 2, get_depth_stencil_surface),
     ("IDirect3DDevice9::BeginScene", 1, begin_scene),
     ("IDirect3DDevice9::EndScene", 1, end_scene),
     ("IDirect3DDevice9::Clear", 7, clear),
@@ -290,12 +528,12 @@ pub static METHODS: &[Import] = &[
     ("IDirect3DDevice9::GetClipPlane", 3, get_clip_plane),
     ("IDirect3DDevice9::SetRenderState", 3, set_render_state),
     ("IDirect3DDevice9::GetRenderState", 3, get_render_state),
-    ("IDirect3DDevice9::CreateStateBlock", 3, NI),
-    ("IDirect3DDevice9::BeginStateBlock", 1, NI),
-    ("IDirect3DDevice9::EndStateBlock", 2, NI),
+    ("IDirect3DDevice9::CreateStateBlock", 3, create_state_block),
+    ("IDirect3DDevice9::BeginStateBlock", 1, begin_state_block),
+    ("IDirect3DDevice9::EndStateBlock", 2, end_state_block),
     ("IDirect3DDevice9::SetClipStatus", 2, set_clip_status),
     ("IDirect3DDevice9::GetClipStatus", 2, get_clip_status),
-    ("IDirect3DDevice9::GetTexture", 3, NI),
+    ("IDirect3DDevice9::GetTexture", 3, get_texture),
     ("IDirect3DDevice9::SetTexture", 3, set_texture),
     ("IDirect3DDevice9::GetTextureStageState", 4, get_texture_stage_state),
     ("IDirect3DDevice9::SetTextureStageState", 4, set_texture_stage_state),
@@ -312,40 +550,40 @@ pub static METHODS: &[Import] = &[
     ("IDirect3DDevice9::GetSoftwareVertexProcessing", 1, get_software_vertex_processing),
     ("IDirect3DDevice9::SetNPatchMode", 2, set_npatch_mode),
     ("IDirect3DDevice9::GetNPatchMode", 1, NI),
-    ("IDirect3DDevice9::DrawPrimitive", 4, NI),
-    ("IDirect3DDevice9::DrawIndexedPrimitive", 7, NI),
-    ("IDirect3DDevice9::DrawPrimitiveUP", 5, NI),
-    ("IDirect3DDevice9::DrawIndexedPrimitiveUP", 9, NI),
-    ("IDirect3DDevice9::ProcessVertices", 7, NI),
-    ("IDirect3DDevice9::CreateVertexDeclaration", 3, NI),
-    ("IDirect3DDevice9::SetVertexDeclaration", 2, NI),
-    ("IDirect3DDevice9::GetVertexDeclaration", 2, NI),
+    ("IDirect3DDevice9::DrawPrimitive", 4, draw_primitive),
+    ("IDirect3DDevice9::DrawIndexedPrimitive", 7, draw_indexed_primitive),
+    ("IDirect3DDevice9::DrawPrimitiveUP", 5, draw_primitive_up),
+    ("IDirect3DDevice9::DrawIndexedPrimitiveUP", 9, draw_indexed_primitive_up),
+    ("IDirect3DDevice9::ProcessVertices", 7, process_vertices),
+    ("IDirect3DDevice9::CreateVertexDeclaration", 3, create_vertex_declaration),
+    ("IDirect3DDevice9::SetVertexDeclaration", 2, set_vertex_declaration),
+    ("IDirect3DDevice9::GetVertexDeclaration", 2, get_vertex_declaration),
     ("IDirect3DDevice9::SetFVF", 2, set_fvf),
     ("IDirect3DDevice9::GetFVF", 2, get_fvf),
-    ("IDirect3DDevice9::CreateVertexShader", 3, NI),
+    ("IDirect3DDevice9::CreateVertexShader", 3, create_vertex_shader),
     ("IDirect3DDevice9::SetVertexShader", 2, set_vertex_shader),
-    ("IDirect3DDevice9::GetVertexShader", 2, NI),
-    ("IDirect3DDevice9::SetVertexShaderConstantF", 4, NI),
-    ("IDirect3DDevice9::GetVertexShaderConstantF", 4, NI),
-    ("IDirect3DDevice9::SetVertexShaderConstantI", 4, NI),
-    ("IDirect3DDevice9::GetVertexShaderConstantI", 4, NI),
-    ("IDirect3DDevice9::SetVertexShaderConstantB", 4, NI),
-    ("IDirect3DDevice9::GetVertexShaderConstantB", 4, NI),
+    ("IDirect3DDevice9::GetVertexShader", 2, get_vertex_shader),
+    ("IDirect3DDevice9::SetVertexShaderConstantF", 4, set_vs_const_f),
+    ("IDirect3DDevice9::GetVertexShaderConstantF", 4, get_vs_const_f),
+    ("IDirect3DDevice9::SetVertexShaderConstantI", 4, set_vs_const_i),
+    ("IDirect3DDevice9::GetVertexShaderConstantI", 4, get_vs_const_i),
+    ("IDirect3DDevice9::SetVertexShaderConstantB", 4, set_vs_const_b),
+    ("IDirect3DDevice9::GetVertexShaderConstantB", 4, get_vs_const_b),
     ("IDirect3DDevice9::SetStreamSource", 5, set_stream_source),
-    ("IDirect3DDevice9::GetStreamSource", 5, NI),
-    ("IDirect3DDevice9::SetStreamSourceFreq", 3, NI),
-    ("IDirect3DDevice9::GetStreamSourceFreq", 3, NI),
+    ("IDirect3DDevice9::GetStreamSource", 5, get_stream_source),
+    ("IDirect3DDevice9::SetStreamSourceFreq", 3, set_stream_source_freq),
+    ("IDirect3DDevice9::GetStreamSourceFreq", 3, get_stream_source_freq),
     ("IDirect3DDevice9::SetIndices", 2, set_indices),
-    ("IDirect3DDevice9::GetIndices", 2, NI),
-    ("IDirect3DDevice9::CreatePixelShader", 3, NI),
+    ("IDirect3DDevice9::GetIndices", 2, get_indices),
+    ("IDirect3DDevice9::CreatePixelShader", 3, create_pixel_shader),
     ("IDirect3DDevice9::SetPixelShader", 2, set_pixel_shader),
-    ("IDirect3DDevice9::GetPixelShader", 2, NI),
-    ("IDirect3DDevice9::SetPixelShaderConstantF", 4, NI),
-    ("IDirect3DDevice9::GetPixelShaderConstantF", 4, NI),
-    ("IDirect3DDevice9::SetPixelShaderConstantI", 4, NI),
-    ("IDirect3DDevice9::GetPixelShaderConstantI", 4, NI),
-    ("IDirect3DDevice9::SetPixelShaderConstantB", 4, NI),
-    ("IDirect3DDevice9::GetPixelShaderConstantB", 4, NI),
+    ("IDirect3DDevice9::GetPixelShader", 2, get_pixel_shader),
+    ("IDirect3DDevice9::SetPixelShaderConstantF", 4, set_ps_const_f),
+    ("IDirect3DDevice9::GetPixelShaderConstantF", 4, get_ps_const_f),
+    ("IDirect3DDevice9::SetPixelShaderConstantI", 4, set_ps_const_i),
+    ("IDirect3DDevice9::GetPixelShaderConstantI", 4, get_ps_const_i),
+    ("IDirect3DDevice9::SetPixelShaderConstantB", 4, set_ps_const_b),
+    ("IDirect3DDevice9::GetPixelShaderConstantB", 4, get_ps_const_b),
     ("IDirect3DDevice9::DrawRectPatch", 4, NI),
     ("IDirect3DDevice9::DrawTriPatch", 4, NI),
     ("IDirect3DDevice9::DeletePatch", 2, NI),

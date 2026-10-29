@@ -1,4 +1,4 @@
-//! MMX moves, port I/O and segment pushes, checked against Rust. Needs no game files.
+//! MMX moves, port I/O, segment pushes and xlat, checked against Rust. Needs no game files.
 
 mod common;
 
@@ -55,7 +55,17 @@ fn segs(a: &mut CodeAssembler) -> Result<(), IcedError> {
     a.ret()
 }
 
-const SNIPPETS: [(&str, Snippet); 3] = [("mmx", mmx), ("ports", ports), ("segs", segs)];
+/// (table, index): eax = the index with al replaced by table[al] (xlat, as D3DX9 uses it)
+fn xlat(a: &mut CodeAssembler) -> Result<(), IcedError> {
+    a.push(ebx)?;
+    a.mov(ebx, dword_ptr(esp + 8))?;
+    a.mov(eax, dword_ptr(esp + 12))?;
+    a.xlatb()?;
+    a.pop(ebx)?;
+    a.ret()
+}
+
+const SNIPPETS: [(&str, Snippet); 4] = [("mmx", mmx), ("ports", ports), ("segs", segs), ("xlat", xlat)];
 
 #[test]
 fn misc() {
@@ -81,4 +91,12 @@ fn misc() {
     let cpu = g.call(2, &[]);
     assert_eq!(cpu.r[ECX], 0);
     assert_eq!(cpu.r[ESP], 0x0020_0000 - 0x100, "the return popped the return address");
+
+    for k in 0..256u32 {
+        m.wr8(SCRATCH + k, (k as u8).wrapping_mul(7) ^ 0x5a);
+    }
+    for v in [0x1234_5600u32, 0xdead_beff, 0x80] {
+        let cpu = g.call(3, &[SCRATCH, v]);
+        assert_eq!(cpu.r[EAX], v & !0xff | ((v as u8).wrapping_mul(7) ^ 0x5a) as u32);
+    }
 }

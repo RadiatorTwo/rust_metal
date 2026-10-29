@@ -80,6 +80,19 @@
 0x548ad0 render_start?        render_init (via 0x486f30), then 0x54f190; false gives "Nicht unterstützte Grafikkarte."
 0x479e80 d3d_create_texture   IDirect3DDevice9::CreateTexture; a failure goes to d3d_error
 0x47ab30 d3d_error?           (HRESULT) after a failed device call
+0x479ed0 d3d_create_cube_texture  IDirect3DDevice9::CreateCubeTexture on d3d_device; a failure goes to d3d_error
+0x479f80 d3d_set_texture      (stage 0..7, texture) SetTexture unless the stage already has it (cache at +0x46ac0)
+0x47c3f0 d3d_set_vertex_format?  SetFVF with no vertex shader, or SetVertexDeclaration and the vertex shader; also the 4x4 default textures (CreateTexture, CreateCubeTexture)
+0x4790b0 d3d_make_vertex_shader?  D3DX9-assembled bytecode to CreateVertexShader, then CreateVertexDeclaration
+0x479890 d3d_make_pixel_shader?   D3DX9-assembled bytecode to CreatePixelShader
+0x4781c0 dynvb_lock?          the dynamic vertex buffer (DYNAMIC|WRITEONLY, default pool) as a ring: Lock NOOVERWRITE, DISCARD when full
+0x4783b0 dynib_lock?          the same for the dynamic 16-bit index buffer
+0x478650 dynvb_draw?          SetStreamSource when the buffer changed, DrawPrimitive (the front end's quads: strips of 2 triangles)
+0x478760 dynvb_draw_indexed?  SetStreamSource, SetIndices, DrawIndexedPrimitive from the dynamic buffers
+0x4727f0 mesh_draw?           SetIndices, SetStreamSource, DrawIndexedPrimitive of a static (managed) mesh
+0x46f590 frame_begin?         Clear(Z and stencil, 0xff000080), BeginScene
+0x46f900 frame_end_scene?     EndScene (and a SetStreamSource)
+0x46fb90 frame_present?       Present
 0x557ce0 game_log             writes the first 5 messages (count at 0x76c288) to gunmetal.log in the game folder, with the adapter and version at the first
 0x557f40 game_warning         (message, expression, file, line): "Assertion Failed" text to game_log; hooked (crt.rs): every one goes to our log
 0x464ba0 video_update?        critical section, a method +0xa4 of an object (not the video players)
