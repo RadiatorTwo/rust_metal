@@ -1,6 +1,6 @@
-//! ole32: COM start-up and CoCreateInstance, which finds the classes we implement by CLSID
-//! (`register_class`: DirectShow's filter graph and the like, by the modules that implement
-//! them); task memory from the guest heap.
+//! ole32: COM start-up and CoCreateInstance, which finds the classes we implement by CLSID:
+//! the built-in ones (`BUILTIN`: DirectInput, DirectShow's filter graph and VMR9) and those a
+//! module registers (`register_class`); task memory from the guest heap.
 
 use super::{Import, alloc, arg, free, log, mem};
 use crate::rt::Cpu;
@@ -13,6 +13,19 @@ pub const REGDB_E_CLASSNOTREG: u32 = 0x8004_0154;
 pub type Create = fn(iid: u32, out: u32) -> u32;
 
 static CLASSES: Mutex<Vec<([u8; 16], Create)>> = Mutex::new(Vec::new());
+
+/// The classes CoCreateInstance always knows (a registered class of the same CLSID wins).
+const BUILTIN: &[([u8; 16], Create)] = &[
+    (super::dinput::CLSID_DIRECTINPUT, super::dinput::create),
+    (super::dshow::CLSID_FILTER_GRAPH, super::dshow::create_graph),
+    (super::dshow::CLSID_VMR9, super::dshow::create_vmr9),
+];
+
+/// A GUID as its 16 bytes in memory.
+pub const fn guid(d1: u32, d2: u16, d3: u16, d4: [u8; 8]) -> [u8; 16] {
+    let (a, b, c) = (d1.to_le_bytes(), d2.to_le_bytes(), d3.to_le_bytes());
+    [a[0], a[1], a[2], a[3], b[0], b[1], c[0], c[1], d4[0], d4[1], d4[2], d4[3], d4[4], d4[5], d4[6], d4[7]]
+}
 
 /// Make a class known to CoCreateInstance (a later registration of the same CLSID wins).
 pub fn register_class(clsid: [u8; 16], create: Create) {
@@ -39,6 +52,7 @@ pub fn guid_at(p: u32) -> [u8; 16] {
 fn co_create_instance(c: &mut Cpu) -> u32 {
     let (clsid, iid, out) = (guid_at(arg(c, 0)), arg(c, 3), arg(c, 4));
     let create = CLASSES.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|e| e.0 == clsid).map(|e| e.1);
+    let create = create.or_else(|| BUILTIN.iter().find(|e| e.0 == clsid).map(|e| e.1));
     match create {
         Some(f) => f(iid, out),
         None => {

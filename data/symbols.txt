@@ -82,9 +82,61 @@
 0x47ab30 d3d_error?           (HRESULT) after a failed device call
 0x557ce0 game_log             writes the first 5 messages (count at 0x76c288) to gunmetal.log in the game folder, with the adapter and version at the first
 0x557f40 game_warning         (message, expression, file, line): "Assertion Failed" text to game_log; hooked (crt.rs): every one goes to our log
-0x4ddcc0 input_init           DirectInput (0x4dcba0, 0x4dded0: CoCreateInstance CLSID_DirectInput, IID_IDirectInput7W), devices; false ends game_start (after "Joystick/joypad not found")
-0x586290 video_poll_events    IMediaEvent::GetEvent of the video's filter graph (videotexture.cpp; no graph: a null call)
-0x464ba0 video_update?        critical section, the video object's method +0xa4 (video_poll_events)
+0x464ba0 video_update?        critical section, a method +0xa4 of an object (not the video players)
+
+# DirectInput 7 (dinput.rs): made through COM, one IDirectInput7A per device kind
+0x4ddcc0 input_init           kb_init, kb_acquire, mouse_init, mouse_acquire, joy_enum, joy_init (result at 0x726bb8), two callbacks (0x4dde00, 0x4dddf0) registered; false (keyboard or mouse failed) ends game_start
+0x4dded0 di_create            as DirectInputCreateEx: CoCreateInstance(CLSID_DirectInput, IID_IDirectInput7W), QueryInterface(riid: IID_IDirectInput7A), Release, Initialize(instance, version)
+0x4dcba0 kb_init              di_create (0x700) unless given one, CreateDeviceEx(GUID_SysKeyboard), SetDataFormat(c_dfDIKeyboard 0x5edef8), SetCooperativeLevel(hwnd, non-exclusive | foreground | no Windows key), kb_set_buffer
+0x4dcc60 kb_set_buffer        SetProperty(DIPROP_BUFFERSIZE, n) and a buffer of n DIDEVICEOBJECTDATA (0x726b00)
+0x4dcce0 kb_buffered          GetDeviceData into the buffer (re-Acquire on loss): keys pressed since the last read marked down in a state copy
+0x4dcdc0 kb_key_down          (dik, read now) GetDeviceState(256) into 0x726a00; a key not down now: kb_buffered
+0x4dce70 kb_acquire
+0x4dcea0 kb_unacquire
+0x4dced0 kb_read              GetDeviceState(256, out), up to 10 re-Acquires on DIERR_INPUTLOST / NOTACQUIRED
+0x4dcf40 kb_release
+0x4dcfa0 key_by_name?         (name, out) a key's code from the table of 0x6d (name, code) pairs at 0x6330d0
+0x4dd010 mouse_init           di_create, CreateDeviceEx(GUID_SysMouse), SetDataFormat(c_dfDIMouse2 0x5edf10), SetCooperativeLevel(hwnd, exclusive | foreground)
+0x4dd0d0 mouse_read           GetDeviceState(20) into 0x726b14, re-Acquire up to 10 times (cleared on failure)
+0x4dd150 mouse_acquire
+0x4dd180 mouse_unacquire
+0x4dd1b0 mouse_release
+0x4dd6f0 joy_enum             di_create, EnumDevices(DIDEVTYPE_JOYSTICK, joy_enum_cb, attached only); per joystick found: CreateDeviceEx, c_dfDIJoystick2?, EnumObjects(joy_axis_cb)
+0x4dd600 joy_enum_cb?         EnumDevices callback: counts and names joysticks (count at +0x890 of the list)
+0x4dd200 joy_axis_cb?         EnumObjects callback: SetProperty(DIPROP_RANGE, -500..500) per axis
+0x4dd820 joy_init             CreateDeviceEx, SetDataFormat, SetCooperativeLevel(exclusive | foreground) per chosen joystick
+
+# Videos (dshow.rs): the current player at video_player, one of two classes
+0x4174a0 video_start          (path, ...) "_h.wmv" for high quality (setting +0x1234), video_use_vmr9 picks videoplayer9 (0x28 bytes) or videotexture (0x44), open (vtable +4), duration (+0x24)
+0x4176e0 video_set_volume     vtable +0x20
+0x417820 video_frame          vtable +0x30 (poll events) and +0x34 (draw); the caller sleeps 25 ms and asks vtable +0x18 (ended)
+0x417850 video_end            deletes the player
+0x417880 video_pause          vtable +8
+0x4178a0 video_resume         vtable +0xc
+0x535410 video_use_vmr9       proj_data +0x2e4 (Extras/VideoMethod): 1 no, 2 yes, else GetVersionExA: NT 5 or later (the game's data has 1)
+0x583580 vmr9_ctor            videoplayer9 (vtable 0x5ecb60; videoplayer9.cpp): IDirect3D9, device
+0x5836c0 vmr9_open            graph (IID_IGraphBuilder), VMR9 (IID_IBaseFilter), IVMRFilterConfig9 renderless and 2 streams, vmr9_set_allocator, AddFilter, IMediaControl +0x18, IMediaPosition +0x20, IBasicAudio +0x24, RenderFile, Run unless paused
+0x583af0 vmr9_close           Stop, releases everything
+0x583b70 vmr9_ended           vmr9_remaining_ms below 0.001
+0x583be0 vmr9_remaining_ms    (duration - position) * 1000
+0x583bb0 vmr9_position_ms
+0x583c30 vmr9_duration_ms
+0x583c60 vmr9_set_volume      IBasicAudio::put_Volume(volume_to_db)
+0x583cb0 vmr9_set_allocator   QueryInterface IVMRSurfaceAllocatorNotify9, a new allocator, AdviseSurfaceAllocator(0xacdcacdc), the allocator's AdviseNotify
+0x583fa0 vmr9_allocator_ctor  the game's IVMRSurfaceAllocator9 (vtable 0x5ecbec) and IVMRImagePresenter9 (0x5ecbd4); GetRenderTarget of the device
+0x584750 vmr9_allocator_advise_notify  keeps the notify, GetAdapterMonitor, SetD3DDevice
+0x586040 vtex_ctor            videotexture (vtable 0x5ecc14; videotexture.cpp)
+0x586150 vtex_dtor            Stop, releases IBasicAudio, IMediaControl, IMediaEvent, IMediaPosition, the graph
+0x586200 vtex_start           CoInitialize, settings, vtex_open
+0x5866d0 vtex_open            graph, AddSourceFilter(path, "SOURCE"), texture_renderer_ctor, AddFilter("TEXTURERENDERER"), FindPin("In"), Render of each output pin of the source, QueryInterface IMediaControl +0x14, IMediaPosition +0x18, IMediaEvent +0x1c, IBasicAudio +0x20, get_Duration, Run
+0x586290 vtex_poll_events     IMediaEvent::GetEvent(timeout 0): EC_COMPLETE ends the video (false) or, looping (+0x28), put_CurrentPosition(0); FreeEventParams
+0x586360 vtex_ended           IMediaPosition duration - position below 0.001 s (or no IMediaPosition)
+0x586260 vtex_position_ms
+0x5863b0 vtex_duration_ms
+0x586680 vtex_set_volume
+0x5863e0 vtex_draw            the renderer's texture on a screen quad
+0x586b50 texture_renderer_ctor  the game's DirectShow renderer (base classes CBaseRenderer, 0x5c69a0), "TEXTURERENDERER", texture at +0x16c
+0x586ae0 volume_to_db         0..1 to hundredths of dB (-10000 at 0)
 
 # Start-up data
 0x664738 d3d_result           what d3d_create returned (game_start skips to an error message for 1 and 2)
@@ -92,6 +144,10 @@
 0x675394 d3d_device           the IDirect3DDevice9
 0x6757e8 d3d_setup            the Direct3D set-up object (DXSetup.cpp): settings flags at +0x18, adapter list at +0x30, count at +0x2c
 0x76c474 cpu_mhz              the clock rate cpu_measure_mhz found; above 1100 a first start takes the fast-CPU default of setting +0x1234 (0x459904)
+0x655690 video_active         a video is playing
+0x655694 video_player         the current video player
+0x726b08 kb_device            the keyboard's IDirectInputDevice7A (its IDirectInput7A at 0x726b0c)
+0x726b28 mouse_device         the mouse's IDirectInputDevice7A (its IDirectInput7A at 0x726b2c, state at 0x726b14)
 0x72a458 proj_data            the project's data (getProjData(): error strings at +0x8d8, settings at +0x35c)
 
 # MFC

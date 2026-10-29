@@ -11,7 +11,9 @@ pub mod com;
 pub mod crt;
 #[cfg(windows)]
 pub mod d3d9;
+pub mod dinput;
 pub mod display;
+pub mod dshow;
 pub mod dsound;
 pub mod gdi32;
 pub mod kernel32;
@@ -71,6 +73,16 @@ pub fn arg(c: &Cpu, n: u32) -> u32 {
 pub fn cstr(a: u32) -> String {
     let m = mem();
     (0..).map(|k| m.rd8(a + k)).take_while(|&b| b != 0).map(|b| b as char).collect()
+}
+
+/// A NUL-terminated guest UTF-16 string (0: empty).
+pub fn wstr(a: u32) -> String {
+    if a == 0 {
+        return String::new();
+    }
+    let m = mem();
+    let units: Vec<u16> = (0..).map(|k| m.rd16(a + 2 * k)).take_while(|&u| u != 0).collect();
+    String::from_utf16_lossy(&units)
 }
 
 /// A NUL-terminated guest string in the game's code page, Windows-1252 (the German texts'

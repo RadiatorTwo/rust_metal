@@ -113,6 +113,11 @@ impl Objects {
         self.map.insert(self.next, o);
         self.next
     }
+
+    /// Forget handle `h` (as CloseHandle).
+    pub fn remove(&mut self, h: u32) {
+        self.map.remove(&h);
+    }
 }
 
 fn wait_signal(g: MutexGuard<'static, Objects>, until: Option<Instant>) -> (MutexGuard<'static, Objects>, bool) {

@@ -80,8 +80,12 @@ gives its HWND for Direct3D 9; it follows the game's SetWindowPos (`place`, also
 input positions are scaled to) and WS_POPUP (`set_decorated`); Alt+Enter borderless
 fullscreen, `display.rs` keeps the choice), `gdi32.rs` (a stock brush), `advapi32.rs` (registry in
 `registry.txt`), `winmm.rs` (clock, timeSetEvent threads), `ole32.rs` (CoCreateInstance by
-CLSID: `ole32::register_class(clsid, create)` for later modules; an unknown CLSID gives
-REGDB_E_CLASSNOTREG and a log line), `dsound.rs` (DirectSoundCreate8 says no device),
+CLSID: built-in DirectInput, filter graph and VMR9, and `ole32::register_class(clsid, create)`
+for later modules; an unknown CLSID gives REGDB_E_CLASSNOTREG and a log line), `dinput.rs`
+(DirectInput 7 from rustschweine: keyboard and mouse by state from the window's input, no
+buffered data yet, no joysticks yet), `dshow.rs` (our own DirectShow filter graph and VMR9:
+videos and sound files are skipped, Run posts EC_COMPLETE and the position is the end, 0; the
+graph is the object later tasks play music through), `dsound.rs` (DirectSoundCreate8 says no device),
 `d3d9/` (Direct3D 9 passed through to the system's d3d9.dll, see below), `crt.rs` (`__ftol`
 hooked; the game's warning report 0x557f40 goes to our log as "game: ..."),
 `sample.rs` (`GUNMETAL_SAMPLE=1` profiler). MessageBoxA is the host's, over our window (scripted runs,
@@ -139,12 +143,18 @@ How the game starts (`GUNMETAL_TRACE_API=1` shows every import call):
    Then render states, a vertex and an index buffer (dynamic, write-only), CreateQuery(event)
    as a support test, textures (DXT3 4x4 and 64x64 managed, A8R8G8B8 2048x2048 system memory,
    loaded through GetSurfaceLevel and LockRect), DirectSoundCreate8 (no device: the game goes
-   on). **The run ends here now**: input_init (0x4ddcc0) asks CoCreateInstance for
-   CLSID_DirectInput with IID_IDirectInput7W; without it the game logs "Joystick/joypad not
-   found" (gunmetal.log in the game folder) and game_start fails: exit(1). Seen with input_init
-   forced true (not kept): next the intro video's DirectShow filter graph (CLSID_FilterGraph,
-   "Failed to create filter graph"), then a crash polling its IMediaEvent (0x586290). No
-   Present comes before these.
+   on). input_init (0x4ddcc0): DirectInput 7 three times through CoCreateInstance
+   (CLSID_DirectInput, IID_IDirectInput7W, then QueryInterface IID_IDirectInput7A,
+   Initialize 0x700; di_create 0x4dded0) for the keyboard, the mouse and the joysticks (none:
+   "Joystick/joypad not found" in gunmetal.log, which is fine). Then the videos
+   (video_start 0x4174a0; `dshow.rs` has the details): Extras/VideoMethod is 1, so the
+   videotexture player (filter graph, AddSourceFilter, the game's own "TEXTURERENDERER"
+   filter, IMediaEvent) plays "cgplayed_01_h.wmv", "intro1_ps_h.wmv", "intro2_ps_h.wmv", each
+   ending at once (one Present each, black: the game draws the video quad with
+   DrawPrimitive). Then the front end: Clear (depth and stencil only), DrawIndexedPrimitive,
+   Present, its textures. **The run ends here now**: IDirect3DDevice9::CreateCubeTexture (not
+   implemented: the game reads the null texture, a fault in 0x480d90). DrawPrimitive and
+   DrawIndexedPrimitive are not implemented yet either, so every frame so far is black.
 3. Registry: the game reads none (its settings are data\init.ini and data\persist.dat); D3DX9
    asks HKLM\Software\Microsoft\Direct3D for debug switches (DisableMMX), which do not exist.
    `registry.txt` holds only our own settings (key HKLM\SOFTWARE\Rage\Gun Metal) and is written

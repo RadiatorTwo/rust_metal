@@ -36,16 +36,24 @@ Updated 2026-10-29. Details on how things work: CLAUDE.md. Design:
       resolution). The window follows SetWindowPos/WS_POPUP; GetSystemMetrics is the real
       display (tests `tests/d3d9_types.rs`)
 
+- [x] DirectInput 7 (`dinput.rs`, keyboard and mouse) and our own DirectShow filter graph and
+      VMR9 (`dshow.rs`): every video ends at once (EC_COMPLETE on Run, position at the end);
+      the game passes its intro videos and presents its first frames (black: drawing is not
+      implemented yet). Both video players of the game (videotexture, which the game's
+      settings choose, and VMR9, in an experiment with video_use_vmr9 forced true) were seen
+      passing (tests `tests/dshow.rs`)
+
 ## Open
 
-- [ ] First frame: game_start needs DirectInput 7 (CoCreateInstance CLSID_DirectInput,
-      IID_IDirectInput7W; input_init 0x4ddcc0) and then a DirectShow filter graph for the
-      intro video before its first Present (Tasks 10 and 9 come before the first frame);
-      Present, Clear and `GUNMETAL_SHOT` are in place but not yet seen running in the game
+- [ ] Front end: the run ends at IDirect3DDevice9::CreateCubeTexture (not implemented, the
+      game faults on the null texture); DrawPrimitive and DrawIndexedPrimitive are called but
+      not implemented (frames are black)
+- [ ] DirectInput: buffered keyboard data (GetDeviceData; the game uses it for short presses),
+      joysticks (gamepads), the exclusive mouse's relative movement at the window's edge
+- [ ] Videos (`.wmv`) and music: the graph skips them now (`dshow.rs`)
 - [ ] Direct3D 9 still open: shaders, vertex declarations, render targets and other device
       surfaces, cube/volume textures, state blocks, GetAdapterMonitor
-- [ ] DirectSound (`dsound.rs`: DirectSoundCreate8 says "no device" now), DirectShow
-      (`ole32::register_class`)
+- [ ] DirectSound (`dsound.rs`: DirectSoundCreate8 says "no device" now)
 - [ ] Imports bound to "not implemented" (stop when called): CreateProcessA,
       EnumSystemLocalesA, CreateFileW, CreateFileMappingA, MapViewOfFile, UnmapViewOfFile
 - [ ] MMX/3DNow!/SSE in the lifter: not needed while CPUID hides them
