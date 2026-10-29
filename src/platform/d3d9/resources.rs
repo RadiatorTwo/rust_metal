@@ -3,9 +3,11 @@
 //! loader 0x479e80) and fills buffers right after CreateDevice; a resource it cannot create
 //! ends the game (0x47ab30).
 //!
-//! A lock gives the game a guest buffer (`com::shadow`, kept per object and level) with the
-//! host's pitch; the host's resource stays locked until the game unlocks, then the guest
-//! bytes are copied to it. The host's contents are copied in at the lock unless the lock
+//! A lock gives the game a guest buffer (`com::shadow`, kept per object and level; a buffer's
+//! covers the whole buffer and a lock's range is at its offset) with the host's pitch; the
+//! host's resource stays locked until the game unlocks, then the guest bytes are copied to it.
+//! Locks may nest (D3D9 counts them): each object and level keeps a stack of open locks, and
+//! each Unlock copies the range of the latest. The host's contents are copied in at the lock unless the lock
 //! discards them (D3DLOCK_DISCARD), and not copied back for D3DLOCK_READONLY.
 //!
 //! Not here yet (Task 6): render targets and other surfaces of the device, cube and volume textures, vertex declarations, shaders,
@@ -37,24 +39,28 @@ struct Locked {
     flags: u32,
 }
 
-/// Locks by (guest object, level).
-static LOCKS: Mutex<Option<HashMap<(u32, u32), Locked>>> = Mutex::new(None);
+/// Open locks by (guest object, level), the latest last.
+static LOCKS: Mutex<Option<HashMap<(u32, u32), Vec<Locked>>>> = Mutex::new(None);
 
-/// Start a lock: a guest buffer for `size` host bytes at `host`.
-fn begin_lock(this: u32, level: u32, host: *mut c_void, size: usize, flags: u32) -> u32 {
-    let guest = com::shadow(this, level, size as u32);
-    if lock_copy_in(flags) {
+/// Start a lock of (`this`, `level`): `size` host bytes at `host` are the guest's at `guest`
+/// (copied there unless the lock discards them).
+pub fn begin_lock(this: u32, level: u32, guest: u32, host: *mut c_void, size: usize, flags: u32) {
+    if lock_copy_in(flags) && size != 0 {
         mem().slice(guest, size).copy_from_slice(unsafe { std::slice::from_raw_parts(host as *const u8, size) });
     }
-    lock(&LOCKS).get_or_insert_with(HashMap::new).insert((this, level), Locked { host: host as usize, guest, size, flags });
-    guest
+    let mut locks = lock(&LOCKS);
+    locks.get_or_insert_with(HashMap::new).entry((this, level)).or_default().push(Locked { host: host as usize, guest, size, flags });
 }
 
-/// End a lock: the guest bytes to the host (unless read-only). False if there was none.
-fn end_lock(this: u32, level: u32) -> bool {
-    let Some(l) = lock(&LOCKS).as_mut().and_then(|m| m.remove(&(this, level))) else {
+/// End the latest lock of (`this`, `level`): its guest bytes to the host (unless read-only).
+/// False if there was none.
+pub fn end_lock(this: u32, level: u32) -> bool {
+    let Some(l) = lock(&LOCKS).as_mut().and_then(|m| m.get_mut(&(this, level))).and_then(|v| v.pop()) else {
         return false;
     };
+    if l.size == 0 {
+        return true;
+    }
     if l.flags & D3DLOCK_READONLY == 0 {
         unsafe { std::slice::from_raw_parts_mut(l.host as *mut u8, l.size) }.copy_from_slice(mem().slice(l.guest, l.size));
     }
@@ -128,15 +134,16 @@ fn get_level_desc(c: &mut Cpu) -> u32 {
 }
 
 /// Bytes of one row of `width` pixels (of 4x4 blocks for DXT) in `format`, where known.
-fn row_bytes(format: u32, width: u32) -> Option<usize> {
+pub fn row_bytes(format: u32, width: u32) -> Option<usize> {
     let w = width as usize;
     Some(match format {
         0x3154_5844 => w.div_ceil(4) * 8,                              // DXT1
         0x3254_5844..=0x3554_5844 => w.div_ceil(4) * 16,               // DXT2-5
+        36 => w * 8,                                                   // A16B16G16R16
         20 => w * 3,                                                   // R8G8B8
-        21 | 22 | 31 | 32 | 33 | 35 | 63 | 64 | 75 | 77 | 79 => w * 4, // 32-bit
-        23..=26 | 29 | 30 | 51 | 60 | 62 | 70 | 80 | 81 => w * 2,      // 16-bit
-        28 | 41 | 50 | 52 => w,                                        // 8-bit
+        21 | 22 | 31..=35 | 62..=64 | 71 | 75 | 77 | 79 | 83 => w * 4, // 32-bit
+        23..=26 | 29 | 30 | 40 | 51 | 60 | 61 | 70 | 80 | 81 => w * 2, // 16-bit
+        27 | 28 | 41 | 50 | 52 => w,                                   // 8-bit
         _ => return None,
     })
 }
@@ -144,6 +151,17 @@ fn row_bytes(format: u32, width: u32) -> Option<usize> {
 fn is_dxt(format: u32) -> bool {
     (0x3154_5844..=0x3554_5844).contains(&format)
 }
+
+/// The bytes a lock of w x h pixels in `format` with `pitch` covers: whole rows of `pitch`
+/// but the last, which has only the rect's bytes (rows of 4x4 blocks for DXT). None for a
+/// format of unknown size.
+pub fn lock_bytes(format: u32, w: u32, h: u32, pitch: usize) -> Option<usize> {
+    let rows = if is_dxt(format) { h.div_ceil(4) } else { h } as usize;
+    let last = row_bytes(format, w)?.min(pitch);
+    Some(if rows == 0 { 0 } else { (rows - 1) * pitch + last })
+}
+
+pub const D3DERR_INVALIDCALL: u32 = 0x8876_086c;
 
 /// A rectangle lock of a level or surface described by `desc`: the guest buffer holds the
 /// locked rows with the host's pitch. `host_lock` locks the host's; the result goes to the
@@ -158,17 +176,27 @@ fn lock_rect_common(
     host_lock: impl FnOnce(&mut D3DLOCKED_RECT) -> windows::core::HRESULT,
 ) -> u32 {
     let m = mem();
-    let (w, h) = if rect == 0 { (desc.Width, desc.Height) } else { (m.rd32(rect + 8) - m.rd32(rect), m.rd32(rect + 12) - m.rd32(rect + 4)) };
+    let format = desc.Format.0;
+    let (w, h) = if rect == 0 {
+        (desc.Width, desc.Height)
+    } else {
+        (m.rd32(rect + 8).wrapping_sub(m.rd32(rect)), m.rd32(rect + 12).wrapping_sub(m.rd32(rect + 4)))
+    };
+    // a part of a surface whose bytes per row are unknown cannot be copied safely
+    if rect != 0 && row_bytes(format, w).is_none() {
+        log!("warn: LockRect of a part of a surface in format {format:#x}: not supported (D3DERR_INVALIDCALL)");
+        return D3DERR_INVALIDCALL;
+    }
     let mut lr = D3DLOCKED_RECT::default();
     let r = host_lock(&mut lr);
     if r.is_err() {
         return hr(r);
     }
     let pitch = lr.Pitch as usize;
-    let rows = if is_dxt(desc.Format.0) { h.div_ceil(4) } else { h } as usize;
-    let last = row_bytes(desc.Format.0, w).unwrap_or(pitch).min(pitch);
-    let size = if rows == 0 { 0 } else { (rows - 1) * pitch + last };
-    let guest = begin_lock(this, level, lr.pBits, size, flags);
+    // a whole level of unknown format: all its rows of pitch bytes
+    let size = lock_bytes(format, w, h, pitch).unwrap_or(h as usize * pitch);
+    let guest = com::shadow(this, level, size as u32);
+    begin_lock(this, level, guest, lr.pBits, size, flags);
     m.wr32(out, lr.Pitch as u32);
     m.wr32(out + 4, guest);
     0
@@ -320,23 +348,37 @@ fn ib_qi(c: &mut Cpu) -> u32 {
 }
 
 /// The buffer's size (D3DVERTEXBUFFER_DESC and D3DINDEXBUFFER_DESC both have it at 16).
-fn buffer_size(p: *mut c_void, v: &IDirect3DVertexBuffer9_Vtbl) -> u32 {
+fn buffer_size(p: *mut c_void, v: &IDirect3DVertexBuffer9_Vtbl) -> Result<u32, windows::core::HRESULT> {
     let mut d = [0u32; 6];
-    let _ = unsafe { (v.GetDesc)(p, d.as_mut_ptr() as *mut D3DVERTEXBUFFER_DESC) };
-    d[4]
+    let r = unsafe { (v.GetDesc)(p, d.as_mut_ptr() as *mut D3DVERTEXBUFFER_DESC) };
+    if r.is_err() { Err(r) } else { Ok(d[4]) }
 }
 
-/// Lock(offset, size, out pointer, flags): size 0 is the rest of the buffer.
+/// Lock(offset, size, out pointer, flags): size 0 is the rest of the buffer. The guest buffer
+/// covers the whole buffer; the game gets the lock's offset in it.
 fn buffer_lock(c: &mut Cpu) -> u32 {
     let (p, v) = buf(c);
     let (this, offset, size, out, flags) = (arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4));
-    let size = if size == 0 { buffer_size(p, v).saturating_sub(offset) } else { size };
+    let total = match buffer_size(p, v) {
+        Ok(t) => t,
+        Err(r) => {
+            log!("warn: buffer Lock: GetDesc failed: {:#x}", r.0);
+            return hr(r);
+        }
+    };
+    let size = if size == 0 { total.saturating_sub(offset) } else { size };
+    if offset as u64 + size as u64 > total as u64 {
+        log!("warn: buffer Lock({offset:#x}, {size:#x}) past its end {total:#x} (D3DERR_INVALIDCALL)");
+        return D3DERR_INVALIDCALL;
+    }
     let mut data: *mut c_void = std::ptr::null_mut();
     let r = unsafe { (v.Lock)(p, offset, size, &mut data, flags) };
     if r.is_err() {
         return hr(r);
     }
-    mem().wr32(out, begin_lock(this, 0, data, size as usize, flags));
+    let guest = com::shadow(this, 0, total) + offset;
+    begin_lock(this, 0, guest, data, size as usize, flags);
+    mem().wr32(out, guest);
     0
 }
 

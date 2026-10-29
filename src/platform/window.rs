@@ -38,6 +38,8 @@ struct App {
     want: Option<(String, u32, u32)>,
     /// the game made its window a popup (no frame and title bar)
     popup: bool,
+    /// a fullscreen Direct3D device sets `game_size` (its back buffer), not SetWindowPos
+    device_fullscreen: bool,
     window: Option<Window>,
     /// the client size the game asked for (input positions are in its pixels)
     game_size: (u32, u32),
@@ -81,6 +83,7 @@ fn with_host<R>(f: impl FnOnce(&mut Host) -> R) -> R {
                 app: App {
                     want: None,
                     popup: false,
+                    device_fullscreen: false,
                     window: None,
                     game_size: (640, 480),
                     input: VecDeque::new(),
@@ -132,7 +135,9 @@ pub fn place(x: i32, y: i32, w: u32, h: u32) {
     }
     let (w, h) = (w.max(1), h.max(1));
     with_host(|host| {
-        host.app.game_size = (w, h);
+        if !host.app.device_fullscreen {
+            host.app.game_size = (w, h);
+        }
         if let Some(want) = &mut host.app.want {
             (want.1, want.2) = (w, h);
         }
@@ -143,6 +148,31 @@ pub fn place(x: i32, y: i32, w: u32, h: u32) {
         let origin = win.current_monitor().map_or(PhysicalPosition::new(0, 0), |m| m.position());
         win.set_outer_position(PhysicalPosition::new(origin.x + x, origin.y + y));
         let _ = win.request_inner_size(PhysicalSize::new(w, h));
+    });
+}
+
+/// A fullscreen Direct3D device of w x h (CreateDevice, Reset): input positions are in its
+/// pixels until the device is windowed again; SetWindowPos no longer changes that.
+pub fn set_game_size(w: u32, h: u32) {
+    if !on_main() {
+        return;
+    }
+    with_host(|host| {
+        host.app.device_fullscreen = true;
+        host.app.game_size = (w.max(1), h.max(1));
+    });
+}
+
+/// The Direct3D device is windowed: input positions are in pixels of the game's main window
+/// again.
+pub fn windowed_game_size() {
+    if !on_main() {
+        return;
+    }
+    let r = super::user32::main_rect();
+    with_host(|host| {
+        host.app.device_fullscreen = false;
+        host.app.game_size = (((r[2] - r[0]).max(1)) as u32, ((r[3] - r[1]).max(1)) as u32);
     });
 }
 

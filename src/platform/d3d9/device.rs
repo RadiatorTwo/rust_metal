@@ -7,7 +7,6 @@
 //!
 //! `GUNMETAL_SHOT=file.png`: the back buffer is written there before Present (see `shot`).
 
-use super::types::*;
 use super::{add_ref, cp, gp, hr, query_interface, release, resources, vtbl};
 use crate::platform::{Import, arg, com, log, mem, method_not_implemented as NI, window};
 use crate::rt::Cpu;
@@ -35,6 +34,16 @@ macro_rules! pass {
             hr(unsafe { (v.$m)(p, $($a),*) })
         }
     };
+}
+
+/// Release: at 0 the device is gone (`d3d9::device` null).
+fn device_release(c: &mut Cpu) -> u32 {
+    let host = com::host(arg(c, 0));
+    let n = release(c);
+    if n == 0 {
+        super::device_released(host);
+    }
+    n
 }
 
 fn qi(c: &mut Cpu) -> u32 {
@@ -88,16 +97,7 @@ fn show_cursor(c: &mut Cpu) -> u32 {
 /// Reset(present parameters): a new mode or windowed/fullscreen, as the game asks.
 fn reset(c: &mut Cpu) -> u32 {
     let (p, v) = dv(c);
-    let m = mem();
-    let pp = arg(c, 1);
-    let mut params = present_params_from_guest(m, pp, window::host_hwnd);
-    log!("d3d9: Reset: {}", super::describe(&params));
-    let r = unsafe { (v.Reset)(p, &mut params) };
-    present_params_to_guest(m, pp, &params, window::guest_hwnd);
-    if r.is_err() {
-        log!("warn: Reset failed: {:#x}", r.0);
-    }
-    hr(r)
+    hr(super::with_present_params(arg(c, 1), super::device_no_16bit_modes(), "Reset", |params| unsafe { (v.Reset)(p, params) }))
 }
 
 /// Present(source rect, dest rect, window, dirty region): the back buffer, written to
@@ -233,7 +233,7 @@ pass!(get_current_texture_palette, GetCurrentTexturePalette, |c| (gp(arg(c, 1)))
 pub static METHODS: &[Import] = &[
     ("IDirect3DDevice9::QueryInterface", 3, qi),
     ("IDirect3DDevice9::AddRef", 1, add_ref),
-    ("IDirect3DDevice9::Release", 1, release),
+    ("IDirect3DDevice9::Release", 1, device_release),
     ("IDirect3DDevice9::TestCooperativeLevel", 1, test_cooperative_level),
     ("IDirect3DDevice9::GetAvailableTextureMem", 1, get_available_texture_mem),
     ("IDirect3DDevice9::EvictManagedResources", 1, evict_managed_resources),

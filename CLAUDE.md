@@ -97,15 +97,19 @@ D3DDEVICE_CREATION_PARAMETERS (an HWND) are converted (`types.rs`), D3DADAPTER_I
 copied without the host's padding (1100 bytes). Methods without an implementation
 (`method_not_implemented` in a method table) return 0 and are logged at their first call;
 with `GUNMETAL_TRACE_API` COM methods also log their result ("-> 0x..."). CreateDevice adds
-D3DCREATE_MULTITHREADED and, without D3DCREATE_FPU_PRESERVE, sets the calling thread's x87
-control word to 24-bit precision as real D3D9 does (`fpu_after_create_device`).
+D3DCREATE_MULTITHREADED and, when it succeeds without D3DCREATE_FPU_PRESERVE, sets the
+calling thread's x87 control word as real D3D9 and Wine do: 24-bit precision, rounding to
+nearest, exceptions masked (`fpu_after_create_device`). A fullscreen device makes input
+positions its back buffer's pixels (`window::set_game_size`) until a Reset to windowed.
 16-bit display modes: the game wants every resolution in exactly two display formats
 (d3d_prune 0x46afd0; XP drivers had R5G6B5 and X8R8G8B8); Windows 8 and later have no 16-bit
 modes, so when the adapter has none, R5G6B5 modes are offered as the X8R8G8B8 ones and
-R5G6B5 as a display format means X8R8G8B8 in the checks. Without that: "Nicht unterstützte
+R5G6B5 as a display format means X8R8G8B8 in the checks and as a fullscreen back buffer in
+CreateDevice/Reset (`host_back_buffer_format`; the game sees its own format back). Without that: "Nicht unterstützte
 Grafikkarte.". `resources.rs`: textures, surfaces of textures, vertex and index buffers,
 queries (what the game creates right after CreateDevice); locks give a guest buffer
-(`com::shadow`) with the host's pitch, copied in unless D3DLOCK_DISCARD and out at the unlock
+(`com::shadow`; a buffer's covers it whole) with the host's pitch, locks nest per object and
+level, a part of a surface of unknown format is refused, copied in unless D3DLOCK_DISCARD and out at the unlock
 unless D3DLOCK_READONLY. Shaders: only "none" goes through. `shot.rs`: `GUNMETAL_SHOT`.
 
 Paths: the game uses paths relative to its folder ("data\init.ini"); `host_path` makes a

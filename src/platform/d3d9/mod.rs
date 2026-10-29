@@ -32,11 +32,12 @@ const CPU_MHZ: u32 = 0x76c474;
 pub const D3DCREATE_FPU_PRESERVE: u32 = 0x2;
 pub const D3DCREATE_MULTITHREADED: u32 = 0x4;
 
-/// The x87 control word after CreateDevice with `flags`: without D3DCREATE_FPU_PRESERVE real
-/// D3D9 sets single precision (precision control, bits 8-9, to 0) on the calling thread and
-/// leaves it so; the game's arithmetic after that is 24-bit.
+/// The x87 control word after a successful CreateDevice with `flags`: without
+/// D3DCREATE_FPU_PRESERVE real D3D9 (and Wine) sets single precision, rounding to nearest and
+/// all exceptions masked on the calling thread and leaves it so; the game's arithmetic after
+/// that is 24-bit.
 pub fn fpu_after_create_device(cw: u16, flags: u32) -> u16 {
-    if flags & D3DCREATE_FPU_PRESERVE != 0 { cw } else { cw & !0x300 }
+    if flags & D3DCREATE_FPU_PRESERVE != 0 { cw } else { (cw & !0x0f3f) | 0x003f }
 }
 
 /// A host pointer to guest memory at `a` (null for 0), for structures with the same layout.
@@ -145,9 +146,51 @@ fn get_adapter_identifier(c: &mut Cpu) -> u32 {
 const R5G6B5: u32 = 23;
 const X8R8G8B8: u32 = 22;
 
-/// The adapter has no R5G6B5 display modes (Windows 8 and later): they are emulated.
+/// The adapter has no R5G6B5 display modes (Windows 8 and later): they are emulated. Asked
+/// once per adapter.
 fn no_16bit_modes(p: *mut c_void, v: &IDirect3D9_Vtbl, adapter: u32) -> bool {
-    unsafe { (v.GetAdapterModeCount)(p, adapter, D3DFORMAT(R5G6B5)) == 0 }
+    static KNOWN: std::sync::Mutex<Vec<(u32, bool)>> = std::sync::Mutex::new(Vec::new());
+    if let Some(&(_, n)) = super::lock(&KNOWN).iter().find(|e| e.0 == adapter) {
+        return n;
+    }
+    let n = unsafe { (v.GetAdapterModeCount)(p, adapter, D3DFORMAT(R5G6B5)) == 0 };
+    super::lock(&KNOWN).push((adapter, n));
+    n
+}
+
+/// The device's adapter has no 16-bit display modes (for Reset).
+static DEVICE_NO_16BIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The back buffer format for the host: fullscreen, the back buffer has the display's format,
+/// and an emulated 16-bit display (no R5G6B5 modes) is X8R8G8B8.
+pub fn host_back_buffer_format(format: u32, windowed: bool, no_16bit_modes: bool) -> u32 {
+    if format == R5G6B5 && !windowed && no_16bit_modes { X8R8G8B8 } else { format }
+}
+
+/// CreateDevice or Reset (`what`, `call`) with the game's present parameters at `pp`: the
+/// back buffer format as the host's (`host_back_buffer_format`), the results written back
+/// with the game's own format. Fullscreen, input positions are in back buffer pixels; back
+/// in a window, in the window's.
+pub(crate) fn with_present_params(pp: u32, no_16bit: bool, what: &str, call: impl FnOnce(&mut D3DPRESENT_PARAMETERS) -> windows::core::HRESULT) -> windows::core::HRESULT {
+    let m = mem();
+    let mut params = present_params_from_guest(m, pp, super::window::host_hwnd);
+    log!("d3d9: {what}: {}", describe(&params));
+    let game_format = params.BackBufferFormat.0;
+    let host_format = host_back_buffer_format(game_format, params.Windowed.0 != 0, no_16bit);
+    params.BackBufferFormat = D3DFORMAT(host_format);
+    let r = call(&mut params);
+    if params.BackBufferFormat.0 == host_format {
+        params.BackBufferFormat = D3DFORMAT(game_format);
+    }
+    present_params_to_guest(m, pp, &params, super::window::guest_hwnd);
+    if r.is_err() {
+        log!("warn: {what} failed: {:#x}", r.0);
+    } else if params.Windowed.0 == 0 {
+        super::window::set_game_size(params.BackBufferWidth, params.BackBufferHeight);
+    } else {
+        super::window::windowed_game_size();
+    }
+    r
 }
 
 /// A display format the game asks about, as the host's.
@@ -237,18 +280,19 @@ fn create_device(c: &mut Cpu) -> u32 {
     let (p, v) = d3d(c);
     let (adapter, ty, focus, flags, pp, out) = (arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4), arg(c, 5), arg(c, 6));
     let m = mem();
-    let mut params = present_params_from_guest(m, pp, super::window::host_hwnd);
-    log!("d3d9: CreateDevice(adapter {adapter}, type {ty}, focus {focus:#x}, flags {flags:#x}): {}", describe(&params));
+    let no_16bit = no_16bit_modes(p, v, adapter);
+    let what = format!("CreateDevice(adapter {adapter}, type {ty}, focus {focus:#x}, flags {flags:#x})");
     let mut dev: *mut c_void = std::ptr::null_mut();
-    let r = unsafe { (v.CreateDevice)(p, adapter, D3DDEVTYPE(ty as i32), host_hwnd(focus), flags | D3DCREATE_MULTITHREADED, &mut params, &mut dev) };
-    present_params_to_guest(m, pp, &params, super::window::guest_hwnd);
-    device::GAME_FLAGS.store(flags, std::sync::atomic::Ordering::Relaxed);
-    c.fcw = fpu_after_create_device(c.fcw, flags);
+    let r = with_present_params(pp, no_16bit, &what, |params| unsafe {
+        (v.CreateDevice)(p, adapter, D3DDEVTYPE(ty as i32), host_hwnd(focus), flags | D3DCREATE_MULTITHREADED, params, &mut dev)
+    });
     if r.is_err() {
-        log!("warn: CreateDevice failed: {:#x}", r.0);
         m.wr32(out, 0);
         return hr(r);
     }
+    device::GAME_FLAGS.store(flags, std::sync::atomic::Ordering::Relaxed);
+    DEVICE_NO_16BIT.store(no_16bit, std::sync::atomic::Ordering::Relaxed);
+    c.fcw = fpu_after_create_device(c.fcw, flags);
     DEVICE.store(dev as usize, std::sync::atomic::Ordering::Relaxed);
     m.wr32(out, com::wrap(device::METHODS, dev));
     0
@@ -260,6 +304,16 @@ static DEVICE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::
 /// The host IDirect3DDevice9 (null before the game created it), for drawing of our own.
 pub fn device() -> *mut c_void {
     DEVICE.load(std::sync::atomic::Ordering::Relaxed) as *mut c_void
+}
+
+/// The device's Release returned 0: `device()` is null again.
+pub(crate) fn device_released(host: *mut c_void) {
+    let _ = DEVICE.compare_exchange(host as usize, 0, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the device's adapter has its 16-bit display modes emulated.
+pub(crate) fn device_no_16bit_modes() -> bool {
+    DEVICE_NO_16BIT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Present parameters for the log.

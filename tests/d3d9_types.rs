@@ -33,6 +33,45 @@ fn fpu_after_create() {
     assert_eq!(fpu_after_create_device(0x027f, 0), 0x007f);
     assert_eq!(fpu_after_create_device(0x027f, D3DCREATE_FPU_PRESERVE), 0x027f);
     assert_eq!(fpu_after_create_device(0x037f, 0x40), 0x007f);
+    // rounding to nearest, all exceptions masked; reserved and infinity bits kept
+    assert_eq!(fpu_after_create_device(0x0e7f, 0), 0x007f);
+    assert_eq!(fpu_after_create_device(0x0c30, 0), 0x003f);
+    assert_eq!(fpu_after_create_device(0x1f72, 0), 0x107f);
+    assert_eq!(fpu_after_create_device(0x0c30, D3DCREATE_FPU_PRESERVE), 0x0c30);
+}
+
+#[test]
+fn back_buffer_format_for_host() {
+    use rust_metal::platform::d3d9::host_back_buffer_format as f;
+    const R5G6B5: u32 = 23;
+    const X8R8G8B8: u32 = 22;
+    // fullscreen 16-bit without 16-bit display modes: the 32-bit display's format
+    assert_eq!(f(R5G6B5, false, true), X8R8G8B8);
+    // windowed, or the adapter has 16-bit modes, or another format: as the game asks
+    assert_eq!(f(R5G6B5, true, true), R5G6B5);
+    assert_eq!(f(R5G6B5, false, false), R5G6B5);
+    assert_eq!(f(X8R8G8B8, false, true), X8R8G8B8);
+    assert_eq!(f(25, false, true), 25);
+}
+
+#[test]
+fn lock_sizes() {
+    use rust_metal::platform::d3d9::resources::{lock_bytes, row_bytes};
+    const DXT1: u32 = 0x3154_5844;
+    const DXT3: u32 = 0x3354_5844;
+    assert_eq!(row_bytes(21, 10), Some(40));
+    assert_eq!(row_bytes(23, 10), Some(20));
+    assert_eq!(row_bytes(DXT1, 64), Some(128));
+    assert_eq!(row_bytes(DXT3, 6), Some(32));
+    assert_eq!(row_bytes(0x1234, 10), None);
+    // 10x3 A8R8G8B8 of a surface with pitch 256: 2 whole rows and 40 bytes
+    assert_eq!(lock_bytes(21, 10, 3, 256), Some(2 * 256 + 40));
+    // DXT3 64x64, pitch 256 (16 blocks of 16 bytes): 16 block rows
+    assert_eq!(lock_bytes(DXT3, 64, 64, 256), Some(16 * 256));
+    // a 4x8 part of a DXT1 surface: 2 block rows, the last 8 bytes
+    assert_eq!(lock_bytes(DXT1, 4, 8, 128), Some(128 + 8));
+    assert_eq!(lock_bytes(21, 10, 0, 256), Some(0));
+    assert_eq!(lock_bytes(0x1234, 10, 3, 256), None);
 }
 
 #[test]
