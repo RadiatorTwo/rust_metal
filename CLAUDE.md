@@ -74,17 +74,39 @@ only the EXE here, no engine DLL.
 
 `mod.rs` (thunks for imports, guest heap, threads taking turns, calls into guest code, paths,
 system DLLs for LoadLibraryA/GetProcAddress), `kernel32.rs`, `user32.rs` (the game's window
-is guest bookkeeping, its window procedure guest code), `window.rs` (the real window with
-winit, no GL: `host_hwnd` gives its HWND for Direct3D 9; Alt+Enter borderless fullscreen,
-`display.rs` keeps the choice), `gdi32.rs` (a stock brush), `advapi32.rs` (registry in
+is guest bookkeeping, its window procedure guest code; GetSystemMetrics reports the size of
+the display the window is on), `window.rs` (the real window with winit, no GL: `host_hwnd`
+gives its HWND for Direct3D 9; it follows the game's SetWindowPos (`place`, also the size
+input positions are scaled to) and WS_POPUP (`set_decorated`); Alt+Enter borderless
+fullscreen, `display.rs` keeps the choice), `gdi32.rs` (a stock brush), `advapi32.rs` (registry in
 `registry.txt`), `winmm.rs` (clock, timeSetEvent threads), `ole32.rs` (CoCreateInstance by
 CLSID: `ole32::register_class(clsid, create)` for later modules; an unknown CLSID gives
 REGDB_E_CLASSNOTREG and a log line), `dsound.rs` (DirectSoundCreate8 says no device),
-`d3d9.rs` (Direct3DCreate9: the run ends there for now, logging the MHz the game measured), `crt.rs` (`__ftol` hooked),
+`d3d9/` (Direct3D 9 passed through to the system's d3d9.dll, see below), `crt.rs` (`__ftol`
+hooked; the game's warning report 0x557f40 goes to our log as "game: ..."),
 `sample.rs` (`GUNMETAL_SAMPLE=1` profiler). MessageBoxA is the host's, over our window (scripted runs,
 `GUNMETAL_INPUT`, answer it at once with its first button). Imports without an implementation stop the run
 with "import X is not implemented yet" when called (listed at start: CreateProcessA,
 EnumSystemLocalesA, file mappings, CreateFileW).
+
+Direct3D 9 (`d3d9/`): every interface the game holds is a guest COM object (`com::wrap`) with
+our vtable in the SDK's order (IDirect3D9 17 methods, IDirect3DDevice9 119); a method finds
+the host interface behind `this` and calls the real one. Structures without pointers are
+passed in place (guest memory is host memory at `mem().base`); D3DPRESENT_PARAMETERS and
+D3DDEVICE_CREATION_PARAMETERS (an HWND) are converted (`types.rs`), D3DADAPTER_IDENTIFIER9 is
+copied without the host's padding (1100 bytes). Methods without an implementation
+(`method_not_implemented` in a method table) return 0 and are logged at their first call;
+with `GUNMETAL_TRACE_API` COM methods also log their result ("-> 0x..."). CreateDevice adds
+D3DCREATE_MULTITHREADED and, without D3DCREATE_FPU_PRESERVE, sets the calling thread's x87
+control word to 24-bit precision as real D3D9 does (`fpu_after_create_device`).
+16-bit display modes: the game wants every resolution in exactly two display formats
+(d3d_prune 0x46afd0; XP drivers had R5G6B5 and X8R8G8B8); Windows 8 and later have no 16-bit
+modes, so when the adapter has none, R5G6B5 modes are offered as the X8R8G8B8 ones and
+R5G6B5 as a display format means X8R8G8B8 in the checks. Without that: "Nicht unterstützte
+Grafikkarte.". `resources.rs`: textures, surfaces of textures, vertex and index buffers,
+queries (what the game creates right after CreateDevice); locks give a guest buffer
+(`com::shadow`) with the host's pitch, copied in unless D3DLOCK_DISCARD and out at the unlock
+unless D3DLOCK_READONLY. Shaders: only "none" goes through. `shot.rs`: `GUNMETAL_SHOT`.
 
 Paths: the game uses paths relative to its folder ("data\init.ini"); `host_path` makes a
 guest path absolute against the current folder (at start `INSTALL_DIR`, C:\Spiele\Gun Metal,
@@ -100,13 +122,25 @@ How the game starts (`GUNMETAL_TRACE_API=1` shows every import call):
    which pushfd/popfd keep, then CPUID and a 1 s busy measurement of rdtsc, the host's real
    TSC, against timeGetTime: cpu_mhz, e.g. 3403; above 1100 a first start picks the fast-CPU
    default of a detail setting at 0x459904), CoInitialize, then d3d_create (0x469530): LoadLibraryA("d3d9.dll") ->
-   GetProcAddress("Direct3DCreate9") -> Direct3DCreate9(31). **The run ends here now**
-   (Direct3D 9: next task).
-2. Seen with a stand-in IDirect3D9 (not kept): GetAdapterIdentifier; the window (FindWindowA,
-   RegisterClassA, CreateWindowExA "Gunmetal" 320x240, then data\init.ini, SetWindowLongA
-   WS_POPUP, SetWindowPos to the desktop size from GetSystemMetrics, ShowWindow); then
-   game_start (0x457ae0): data\init.pck, the CD check, data\persist.dat (created if missing),
-   the adapter's modes for formats 0x15..0x19 (none: "Nicht unterstützte Grafikkarte.", exit).
+   GetProcAddress("Direct3DCreate9") -> Direct3DCreate9(31), GetAdapterIdentifier(0).
+2. The window (FindWindowA, RegisterClassA, CreateWindowExA "Gunmetal" 320x240, then
+   data\init.ini, SetWindowLongA WS_POPUP, SetWindowPos to the desktop size from
+   GetSystemMetrics, e.g. 2560x1440, ShowWindow); then game_start (0x457ae0): data\init.pck,
+   the CD check, data\persist.dat (created if missing), d3d_enum_adapters (0x469760): per
+   adapter GetAdapterModeCount for 5 formats, GetDeviceCaps, every mode with CheckDeviceFormat,
+   CheckDeviceMultiSampleType, CheckDepthStencilMatch (resolutions 640x480..1600x1200).
+   CreateDevice (adapter 0, HAL, flags 0x44 = hardware vertex processing | multithreaded):
+   1024x768 fullscreen X8R8G8B8, 1 back buffer, 2x multisampling, discard, D24S8, immediate
+   (the mode comes from data\persist.dat's defaults; the desktop size does not change it).
+   Then render states, a vertex and an index buffer (dynamic, write-only), CreateQuery(event)
+   as a support test, textures (DXT3 4x4 and 64x64 managed, A8R8G8B8 2048x2048 system memory,
+   loaded through GetSurfaceLevel and LockRect), DirectSoundCreate8 (no device: the game goes
+   on). **The run ends here now**: input_init (0x4ddcc0) asks CoCreateInstance for
+   CLSID_DirectInput with IID_IDirectInput7W; without it the game logs "Joystick/joypad not
+   found" (gunmetal.log in the game folder) and game_start fails: exit(1). Seen with input_init
+   forced true (not kept): next the intro video's DirectShow filter graph (CLSID_FilterGraph,
+   "Failed to create filter graph"), then a crash polling its IMediaEvent (0x586290). No
+   Present comes before these.
 3. Registry: the game reads none (its settings are data\init.ini and data\persist.dat); D3DX9
    asks HKLM\Software\Microsoft\Direct3D for debug switches (DisableMMX), which do not exist.
    `registry.txt` holds only our own settings (key HKLM\SOFTWARE\Rage\Gun Metal) and is written
@@ -121,7 +155,9 @@ How the game starts (`GUNMETAL_TRACE_API=1` shows every import call):
 Env: `GUNMETAL_TRACE_API` (imports with arguments), `GUNMETAL_TRACE_REG`, `GUNMETAL_TRACE_MSG`,
 `GUNMETAL_INPUT` (scripted input, see `window.rs`), `GUNMETAL_WINDOW=WxH`,
 `GUNMETAL_MONITOR=n`, `GUNMETAL_WATCH` (where the game is, every 2 s), `GUNMETAL_PROF`,
-`GUNMETAL_SAMPLE`, `GUNMETAL_COUNT=<file>`.
+`GUNMETAL_SAMPLE`, `GUNMETAL_COUNT=<file>`, `GUNMETAL_SHOT=shot/x.png` (the back buffer
+before Present, at most every `GUNMETAL_SHOT_MS`, 500; `{t}` in the name: ms since start;
+`shot/` is git-ignored: game imagery is never committed).
 
 Tools: `cargo run --release --example functions -- game_files [--gaps]` (find + compile,
 statistics), `examples/dis.rs <folder> <addr|all>`, `examples/ghidra.rs <folder> [json]`

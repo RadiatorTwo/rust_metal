@@ -1,0 +1,307 @@
+//! d3d9.dll, passed through to the system's. The game loads it with LoadLibraryA (`d3d9.dll`,
+//! else `d3d9d.dll`) and asks for `Direct3DCreate9` (d3d_create, 0x469530: the first thing the
+//! game does after the C runtime, its CPU detection and CoInitialize, before its window exists).
+//!
+//! Every interface the game holds is a guest COM object (`com::wrap`) whose vtable is ours, in
+//! the SDK's method order; each method finds the host interface behind `this` and calls the
+//! real one. Structures without pointers are passed in place (guest memory is host memory at
+//! `mem().base`); those with a window handle are converted (`types`). Methods we do not
+//! implement return 0 (D3D_OK) and are logged at their first call by name.
+//!
+//! What the game asks for (adapters, modes, caps, the device's mode and windowed/fullscreen)
+//! goes through unchanged. CreateDevice adds D3DCREATE_MULTITHREADED (the game's threads call
+//! in without a turn held) and sets the calling thread's x87 control word as real D3D9 does
+//! on 32-bit Windows (`fpu_after_create_device`).
+
+pub mod device;
+pub mod resources;
+mod shot;
+pub mod types;
+
+use super::{Import, arg, com, log, mem, method_not_implemented as NI};
+use crate::rt::Cpu;
+use std::ffi::c_void;
+use types::*;
+use windows::Win32::Foundation::HWND;
+use windows::Win32::Graphics::Direct3D9::*;
+use windows::core::{GUID, IUnknown_Vtbl, Interface};
+
+/// The CPU's clock rate the game measured (cpu_mhz, 0x563350).
+const CPU_MHZ: u32 = 0x76c474;
+
+pub const D3DCREATE_FPU_PRESERVE: u32 = 0x2;
+pub const D3DCREATE_MULTITHREADED: u32 = 0x4;
+
+/// The x87 control word after CreateDevice with `flags`: without D3DCREATE_FPU_PRESERVE real
+/// D3D9 sets single precision (precision control, bits 8-9, to 0) on the calling thread and
+/// leaves it so; the game's arithmetic after that is 24-bit.
+pub fn fpu_after_create_device(cw: u16, flags: u32) -> u16 {
+    if flags & D3DCREATE_FPU_PRESERVE != 0 { cw } else { cw & !0x300 }
+}
+
+/// A host pointer to guest memory at `a` (null for 0), for structures with the same layout.
+pub(crate) fn gp<T>(a: u32) -> *mut T {
+    if a == 0 { std::ptr::null_mut() } else { unsafe { mem().base.add(a as usize) as *mut T } }
+}
+
+/// A host pointer to guest memory at `a` for reading (null for 0).
+pub(crate) fn cp<T>(a: u32) -> *const T {
+    gp::<T>(a)
+}
+
+/// The vtable of a host interface.
+pub(crate) unsafe fn vtbl<V>(p: *mut c_void) -> &'static V {
+    unsafe { &**(p as *const *const V) }
+}
+
+/// An HRESULT as eax.
+pub(crate) fn hr(h: windows::core::HRESULT) -> u32 {
+    h.0 as u32
+}
+
+pub(crate) const E_NOINTERFACE: u32 = 0x8000_4002;
+
+/// QueryInterface for an interface we wrap: IUnknown or `own` gives the same object, anything
+/// else E_NOINTERFACE (logged).
+pub(crate) fn query_interface(c: &mut Cpu, own: GUID, name: &str) -> u32 {
+    let (this, riid, ppv) = (arg(c, 0), arg(c, 1), arg(c, 2));
+    let g: GUID = read_guest(mem(), riid);
+    if g == own || g == windows::core::IUnknown::IID {
+        add_ref(c);
+        mem().wr32(ppv, this);
+        return 0;
+    }
+    log!("warn: {name}::QueryInterface({g:?}): not wrapped (E_NOINTERFACE)");
+    if ppv != 0 {
+        mem().wr32(ppv, 0);
+    }
+    E_NOINTERFACE
+}
+
+/// IUnknown::AddRef of any wrapped interface: the host's count.
+pub(crate) fn add_ref(c: &mut Cpu) -> u32 {
+    let p = com::host(arg(c, 0));
+    unsafe { (vtbl::<IUnknown_Vtbl>(p).AddRef)(p) }
+}
+
+/// IUnknown::Release of any wrapped interface: the host's count; at 0 the guest object goes.
+pub(crate) fn release(c: &mut Cpu) -> u32 {
+    let this = arg(c, 0);
+    let p = com::host(this);
+    let n = unsafe { (vtbl::<IUnknown_Vtbl>(p).Release)(p) };
+    com::release(this, n);
+    n
+}
+
+/// Direct3DCreate9(SDK version): the system's IDirect3D9 (the game asks for 31, D3D9b).
+fn direct3d_create9(c: &mut Cpu) -> u32 {
+    let sdk = arg(c, 0);
+    log!("Direct3DCreate9({sdk}) (the game measured {} MHz)", mem().rd32(CPU_MHZ));
+    match unsafe { Direct3DCreate9(sdk) } {
+        Some(d) => com::wrap(IDIRECT3D9, d.into_raw()),
+        None => {
+            log!("warn: Direct3DCreate9({sdk}) failed");
+            0
+        }
+    }
+}
+
+fn d3d(c: &Cpu) -> (*mut c_void, &'static IDirect3D9_Vtbl) {
+    let p = com::host(arg(c, 0));
+    (p, unsafe { vtbl(p) })
+}
+
+fn qi(c: &mut Cpu) -> u32 {
+    query_interface(c, IDirect3D9::IID, "IDirect3D9")
+}
+
+fn get_adapter_count(c: &mut Cpu) -> u32 {
+    let (p, v) = d3d(c);
+    unsafe { (v.GetAdapterCount)(p) }
+}
+
+fn get_adapter_identifier(c: &mut Cpu) -> u32 {
+    let (p, v) = d3d(c);
+    let mut id = D3DADAPTER_IDENTIFIER9::default();
+    let r = unsafe { (v.GetAdapterIdentifier)(p, arg(c, 1), arg(c, 2), &mut id) };
+    if r.is_ok() {
+        write_guest(mem(), arg(c, 3), &id, ADAPTER_IDENTIFIER_SIZE);
+        let desc: String = id.Description.iter().take_while(|&&b| b != 0).map(|&b| b as u8 as char).collect();
+        log!("d3d9: adapter {}: {desc} (vendor {:#06x} device {:#06x})", arg(c, 1), id.VendorId, id.DeviceId);
+    }
+    hr(r)
+}
+
+// ---- 16-bit display modes ----
+//
+// The game wants every resolution in two colour depths: game_start's mode list (0x469760,
+// 0x469e20) takes the adapter's modes of X1R5G5B5, A1R5G5B5, R5G6B5, X8R8G8B8 and A8R8G8B8,
+// and 0x46afd0 drops a resolution that has not exactly two of them (Windows XP drivers had
+// R5G6B5 and X8R8G8B8). Windows 8 and later have no 16-bit display modes: no resolution
+// would be left ("Nicht unterstützte Grafikkarte."). When the adapter has no R5G6B5 modes,
+// they are offered as its X8R8G8B8 ones, and R5G6B5 as the display format (in checks and
+// fullscreen devices) means X8R8G8B8, which Windows emulates 16-bit with anyway.
+
+const R5G6B5: u32 = 23;
+const X8R8G8B8: u32 = 22;
+
+/// The adapter has no R5G6B5 display modes (Windows 8 and later): they are emulated.
+fn no_16bit_modes(p: *mut c_void, v: &IDirect3D9_Vtbl, adapter: u32) -> bool {
+    unsafe { (v.GetAdapterModeCount)(p, adapter, D3DFORMAT(R5G6B5)) == 0 }
+}
+
+/// A display format the game asks about, as the host's.
+fn display_format(p: *mut c_void, v: &IDirect3D9_Vtbl, adapter: u32, f: u32) -> D3DFORMAT {
+    D3DFORMAT(if f == R5G6B5 && no_16bit_modes(p, v, adapter) { X8R8G8B8 } else { f })
+}
+
+fn get_adapter_mode_count(c: &mut Cpu) -> u32 {
+    let (p, v) = d3d(c);
+    let adapter = arg(c, 1);
+    unsafe { (v.GetAdapterModeCount)(p, adapter, display_format(p, v, adapter, arg(c, 2))) }
+}
+
+fn enum_adapter_modes(c: &mut Cpu) -> u32 {
+    let (p, v) = d3d(c);
+    let (adapter, f, out) = (arg(c, 1), arg(c, 2), arg(c, 4));
+    let r = unsafe { (v.EnumAdapterModes)(p, adapter, display_format(p, v, adapter, f), arg(c, 3), gp(out)) };
+    if r.is_ok() {
+        // D3DDISPLAYMODE: width, height, refresh rate, format
+        mem().wr32(out + 12, f);
+    }
+    hr(r)
+}
+
+fn get_adapter_display_mode(c: &mut Cpu) -> u32 {
+    let (p, v) = d3d(c);
+    hr(unsafe { (v.GetAdapterDisplayMode)(p, arg(c, 1), gp(arg(c, 2))) })
+}
+
+fn check_device_type(c: &mut Cpu) -> u32 {
+    let (p, v) = d3d(c);
+    let a = |k| arg(c, k);
+    let display = display_format(p, v, a(1), a(3));
+    // fullscreen, the back buffer has the display's format
+    let back = if a(5) == 0 && a(4) == a(3) { display } else { D3DFORMAT(a(4)) };
+    hr(unsafe { (v.CheckDeviceType)(p, a(1), D3DDEVTYPE(a(2) as i32), display, back, windows::core::BOOL(a(5) as i32)) })
+}
+
+fn check_device_format(c: &mut Cpu) -> u32 {
+    let (p, v) = d3d(c);
+    let a = |k| arg(c, k);
+    hr(unsafe {
+        (v.CheckDeviceFormat)(p, a(1), D3DDEVTYPE(a(2) as i32), display_format(p, v, a(1), a(3)), a(4), D3DRESOURCETYPE(a(5) as i32), D3DFORMAT(a(6)))
+    })
+}
+
+fn check_device_multi_sample_type(c: &mut Cpu) -> u32 {
+    let (p, v) = d3d(c);
+    let a = |k| arg(c, k);
+    hr(unsafe {
+        (v.CheckDeviceMultiSampleType)(
+            p,
+            a(1),
+            D3DDEVTYPE(a(2) as i32),
+            D3DFORMAT(a(3)),
+            windows::core::BOOL(a(4) as i32),
+            D3DMULTISAMPLE_TYPE(a(5) as i32),
+            gp(a(6)),
+        )
+    })
+}
+
+fn check_depth_stencil_match(c: &mut Cpu) -> u32 {
+    let (p, v) = d3d(c);
+    let a = |k| arg(c, k);
+    hr(unsafe { (v.CheckDepthStencilMatch)(p, a(1), D3DDEVTYPE(a(2) as i32), display_format(p, v, a(1), a(3)), D3DFORMAT(a(4)), D3DFORMAT(a(5))) })
+}
+
+fn check_device_format_conversion(c: &mut Cpu) -> u32 {
+    let (p, v) = d3d(c);
+    let a = |k| arg(c, k);
+    hr(unsafe { (v.CheckDeviceFormatConversion)(p, a(1), D3DDEVTYPE(a(2) as i32), D3DFORMAT(a(3)), D3DFORMAT(a(4))) })
+}
+
+fn get_device_caps(c: &mut Cpu) -> u32 {
+    let (p, v) = d3d(c);
+    hr(unsafe { (v.GetDeviceCaps)(p, arg(c, 1), D3DDEVTYPE(arg(c, 2) as i32), gp(arg(c, 3))) })
+}
+
+/// The host window for a guest one (the game's main window is the winit window).
+pub(crate) fn host_hwnd(guest: u32) -> HWND {
+    HWND(super::window::host_hwnd(guest) as *mut _)
+}
+
+/// CreateDevice(adapter, type, focus window, behaviour flags, present parameters, out device).
+fn create_device(c: &mut Cpu) -> u32 {
+    let (p, v) = d3d(c);
+    let (adapter, ty, focus, flags, pp, out) = (arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4), arg(c, 5), arg(c, 6));
+    let m = mem();
+    let mut params = present_params_from_guest(m, pp, super::window::host_hwnd);
+    log!("d3d9: CreateDevice(adapter {adapter}, type {ty}, focus {focus:#x}, flags {flags:#x}): {}", describe(&params));
+    let mut dev: *mut c_void = std::ptr::null_mut();
+    let r = unsafe { (v.CreateDevice)(p, adapter, D3DDEVTYPE(ty as i32), host_hwnd(focus), flags | D3DCREATE_MULTITHREADED, &mut params, &mut dev) };
+    present_params_to_guest(m, pp, &params, super::window::guest_hwnd);
+    device::GAME_FLAGS.store(flags, std::sync::atomic::Ordering::Relaxed);
+    c.fcw = fpu_after_create_device(c.fcw, flags);
+    if r.is_err() {
+        log!("warn: CreateDevice failed: {:#x}", r.0);
+        m.wr32(out, 0);
+        return hr(r);
+    }
+    DEVICE.store(dev as usize, std::sync::atomic::Ordering::Relaxed);
+    m.wr32(out, com::wrap(device::METHODS, dev));
+    0
+}
+
+/// The host device the game created last (null before CreateDevice).
+static DEVICE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The host IDirect3DDevice9 (null before the game created it), for drawing of our own.
+pub fn device() -> *mut c_void {
+    DEVICE.load(std::sync::atomic::Ordering::Relaxed) as *mut c_void
+}
+
+/// Present parameters for the log.
+pub(crate) fn describe(p: &D3DPRESENT_PARAMETERS) -> String {
+    format!(
+        "{}x{} format {} x{} multisample {}/{} swap effect {} {} hwnd {:#x} depth {} format {} flags {:#x} {} Hz interval {:#x}",
+        p.BackBufferWidth,
+        p.BackBufferHeight,
+        p.BackBufferFormat.0,
+        p.BackBufferCount,
+        p.MultiSampleType.0,
+        p.MultiSampleQuality,
+        p.SwapEffect.0,
+        if p.Windowed.0 != 0 { "windowed" } else { "fullscreen" },
+        p.hDeviceWindow.0 as isize,
+        p.EnableAutoDepthStencil.0,
+        p.AutoDepthStencilFormat.0,
+        p.Flags,
+        p.FullScreen_RefreshRateInHz,
+        p.PresentationInterval
+    )
+}
+
+/// IDirect3D9, in the SDK's order (17 methods).
+pub static IDIRECT3D9: &[Import] = &[
+    ("IDirect3D9::QueryInterface", 3, qi),
+    ("IDirect3D9::AddRef", 1, add_ref),
+    ("IDirect3D9::Release", 1, release),
+    ("IDirect3D9::RegisterSoftwareDevice", 2, NI),
+    ("IDirect3D9::GetAdapterCount", 1, get_adapter_count),
+    ("IDirect3D9::GetAdapterIdentifier", 4, get_adapter_identifier),
+    ("IDirect3D9::GetAdapterModeCount", 3, get_adapter_mode_count),
+    ("IDirect3D9::EnumAdapterModes", 5, enum_adapter_modes),
+    ("IDirect3D9::GetAdapterDisplayMode", 3, get_adapter_display_mode),
+    ("IDirect3D9::CheckDeviceType", 6, check_device_type),
+    ("IDirect3D9::CheckDeviceFormat", 7, check_device_format),
+    ("IDirect3D9::CheckDeviceMultiSampleType", 7, check_device_multi_sample_type),
+    ("IDirect3D9::CheckDepthStencilMatch", 6, check_depth_stencil_match),
+    ("IDirect3D9::CheckDeviceFormatConversion", 5, check_device_format_conversion),
+    ("IDirect3D9::GetDeviceCaps", 4, get_device_caps),
+    ("IDirect3D9::GetAdapterMonitor", 2, NI),
+    ("IDirect3D9::CreateDevice", 7, create_device),
+];
+
+pub const IMPORTS: &[Import] = &[("Direct3DCreate9", 1, direct3d_create9)];

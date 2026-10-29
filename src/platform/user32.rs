@@ -9,9 +9,11 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-/// The desktop the game sees.
-pub const DESKTOP_W: u32 = 1600;
-pub const DESKTOP_H: u32 = 1200;
+/// The desktop the game sees: the display its window is on (`window::screen_size`).
+pub fn desktop() -> [i32; 4] {
+    let (w, h) = window::screen_size();
+    [0, 0, w as i32, h as i32]
+}
 
 pub const WM_CREATE: u32 = 0x01;
 pub const WM_DESTROY: u32 = 0x02;
@@ -470,12 +472,20 @@ fn show_window(c: &mut Cpu) -> u32 {
 
 fn set_window_pos(c: &mut Cpu) -> u32 {
     let (h, x, y, w, hh, flags) = (arg(c, 0), arg(c, 2) as i32, arg(c, 3) as i32, arg(c, 4) as i32, arg(c, 5) as i32, arg(c, 6));
-    let mut s = st();
-    if let Some(win) = s.wins.get_mut(&h) {
-        let r = win.rect;
-        let (nx, ny) = if flags & 2 != 0 { (r[0], r[1]) } else { (x, y) };
-        let (nw, nh) = if flags & 1 != 0 { (r[2] - r[0], r[3] - r[1]) } else { (w, hh) };
-        win.rect = [nx, ny, nx + nw, ny + nh];
+    let placed = {
+        let mut s = st();
+        let main = s.main;
+        s.wins.get_mut(&h).map(|win| {
+            let r = win.rect;
+            let (nx, ny) = if flags & 2 != 0 { (r[0], r[1]) } else { (x, y) };
+            let (nw, nh) = if flags & 1 != 0 { (r[2] - r[0], r[3] - r[1]) } else { (w, hh) };
+            win.rect = [nx, ny, nx + nw, ny + nh];
+            (h == main, win.rect)
+        })
+    };
+    // the main window is the real one
+    if let Some((true, r)) = placed {
+        window::place(r[0], r[1], (r[2] - r[0]) as u32, (r[3] - r[1]) as u32);
     }
     1
 }
@@ -487,13 +497,13 @@ fn write_rect(p: u32, r: [i32; 4]) {
 }
 
 fn get_window_rect(c: &mut Cpu) -> u32 {
-    let r = st().wins.get(&arg(c, 0)).map_or([0, 0, DESKTOP_W as i32, DESKTOP_H as i32], |w| w.rect);
+    let r = st().wins.get(&arg(c, 0)).map(|w| w.rect).unwrap_or_else(desktop);
     write_rect(arg(c, 1), r);
     1
 }
 
 fn get_client_rect(c: &mut Cpu) -> u32 {
-    let r = st().wins.get(&arg(c, 0)).map_or([0, 0, DESKTOP_W as i32, DESKTOP_H as i32], |w| w.rect);
+    let r = st().wins.get(&arg(c, 0)).map(|w| w.rect).unwrap_or_else(desktop);
     write_rect(arg(c, 1), [0, 0, r[2] - r[0], r[3] - r[1]]);
     1
 }
@@ -515,6 +525,11 @@ fn get_window_long(c: &mut Cpu) -> u32 {
 
 fn set_window_long(c: &mut Cpu) -> u32 {
     let (h, i, v) = (arg(c, 0), arg(c, 1) as i32, arg(c, 2));
+    if i == -16 && h == main_window() {
+        // the real window has a frame and title bar while the game's has a caption
+        const WS_CAPTION: u32 = 0x00c0_0000;
+        window::set_decorated(v & WS_CAPTION == WS_CAPTION);
+    }
     let mut s = st();
     let Some(w) = s.wins.get_mut(&h) else { return 0 };
     let f = match i {
@@ -585,7 +600,7 @@ fn keybd_event(c: &mut Cpu) -> u32 {
 fn system_parameters_info(c: &mut Cpu) -> u32 {
     let (action, pv) = (arg(c, 0), arg(c, 2));
     match action {
-        0x30 if pv != 0 => write_rect(pv, [0, 0, DESKTOP_W as i32, DESKTOP_H as i32]), // SPI_GETWORKAREA
+        0x30 if pv != 0 => write_rect(pv, desktop()), // SPI_GETWORKAREA
         0x61 | 0x11 => {}                                                               // screen saver
         _ => log!("warn: SystemParametersInfoA({action:#x}) ignored"),
     }
@@ -594,8 +609,8 @@ fn system_parameters_info(c: &mut Cpu) -> u32 {
 
 fn get_system_metrics(c: &mut Cpu) -> u32 {
     match arg(c, 0) {
-        0 | 16 | 61 | 59 => DESKTOP_W,
-        1 | 17 | 62 | 60 => DESKTOP_H,
+        0 | 16 | 61 | 59 => desktop()[2] as u32,
+        1 | 17 | 62 | 60 => desktop()[3] as u32,
         2 | 3 => 16,
         4 => 19,
         5 | 6 => 1,

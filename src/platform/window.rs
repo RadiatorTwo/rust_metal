@@ -36,6 +36,8 @@ pub enum Input {
 struct App {
     /// the window to open at the next pump: title and client size
     want: Option<(String, u32, u32)>,
+    /// the game made its window a popup (no frame and title bar)
+    popup: bool,
     window: Option<Window>,
     /// the client size the game asked for (input positions are in its pixels)
     game_size: (u32, u32),
@@ -78,6 +80,7 @@ fn with_host<R>(f: impl FnOnce(&mut Host) -> R) -> R {
                 event_loop: b.build().expect("cannot open the window system"),
                 app: App {
                     want: None,
+                    popup: false,
                     window: None,
                     game_size: (640, 480),
                     input: VecDeque::new(),
@@ -112,6 +115,67 @@ pub fn host_hwnd(guest: u32) -> isize {
         return 0;
     }
     *HWND.lock().unwrap()
+}
+
+/// The game's window for a real window's HWND (the main window for ours, else 0).
+pub fn guest_hwnd(host: isize) -> u32 {
+    if host != 0 && host == *HWND.lock().unwrap() { super::user32::main_window() } else { 0 }
+}
+
+/// The game moved or sized its main window (SetWindowPos; desktop coordinates, the desktop
+/// being the display the window is on): the real window follows unless it is fullscreen, and
+/// input positions are in pixels of the new size. Gun Metal makes its window a popup the
+/// size of the desktop (GetSystemMetrics) before it creates its Direct3D device.
+pub fn place(x: i32, y: i32, w: u32, h: u32) {
+    if !on_main() {
+        return;
+    }
+    let (w, h) = (w.max(1), h.max(1));
+    with_host(|host| {
+        host.app.game_size = (w, h);
+        if let Some(want) = &mut host.app.want {
+            (want.1, want.2) = (w, h);
+        }
+        let Some(win) = &host.app.window else { return };
+        if win.fullscreen().is_some() {
+            return;
+        }
+        let origin = win.current_monitor().map_or(PhysicalPosition::new(0, 0), |m| m.position());
+        win.set_outer_position(PhysicalPosition::new(origin.x + x, origin.y + y));
+        let _ = win.request_inner_size(PhysicalSize::new(w, h));
+    });
+}
+
+/// The game set its main window's style (SetWindowLongA GWL_STYLE): without a caption it is a
+/// popup, and the real window loses its frame and title bar.
+pub fn set_decorated(decorated: bool) {
+    if !on_main() {
+        return;
+    }
+    with_host(|host| {
+        host.app.popup = !decorated;
+        if let Some(win) = &host.app.window {
+            win.set_decorations(decorated);
+        }
+    });
+}
+
+/// The size in pixels of the display the window is on (the primary one before the window
+/// exists), for GetSystemMetrics.
+pub fn screen_size() -> (u32, u32) {
+    let monitor = |h: &mut Host| h.app.window.as_ref().and_then(|w| w.current_monitor().or_else(|| w.primary_monitor())).map(|m| (m.size().width, m.size().height));
+    on_main().then(|| with_host(monitor)).flatten().unwrap_or_else(host_screen_size)
+}
+
+#[cfg(windows)]
+fn host_screen_size() -> (u32, u32) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+    unsafe { (GetSystemMetrics(SM_CXSCREEN) as u32, GetSystemMetrics(SM_CYSCREEN) as u32) }
+}
+
+#[cfg(not(windows))]
+fn host_screen_size() -> (u32, u32) {
+    (1920, 1080)
 }
 
 /// Handle the window system's events, waiting up to `wait` for one.
@@ -287,7 +351,7 @@ impl App {
             .ok()
             .and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?))))
             .unwrap_or((w, h));
-        let attrs = Window::default_attributes().with_title(title).with_inner_size(PhysicalSize::new(size.0, size.1));
+        let attrs = Window::default_attributes().with_title(title).with_inner_size(PhysicalSize::new(size.0, size.1)).with_decorations(!self.popup);
         // GUNMETAL_MONITOR=1: opened on that display (0 the first; tests)
         let attrs = match std::env::var("GUNMETAL_MONITOR").ok().and_then(|v| v.parse::<usize>().ok()).and_then(|i| el.available_monitors().nth(i)) {
             Some(m) => attrs.with_position(PhysicalPosition::new(m.position().x + 50, m.position().y + 50)),

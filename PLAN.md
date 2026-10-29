@@ -29,12 +29,21 @@ Updated 2026-10-29. Details on how things work: CLAUDE.md. Design:
       comes from `GunMetal.iso` (test `tests/iso.rs`); seen passing with a stand-in
       IDirect3D9. Registry: the game reads none of its own
 
+- [x] Direct3D 9 passed through (`d3d9/`): IDirect3D9, IDirect3DDevice9 (119 methods in SDK
+      order), textures, texture surfaces, vertex/index buffers, queries; the game's device
+      (1024x768 fullscreen, 2x MSAA) is created on the winit window; 16-bit display modes
+      offered as the 32-bit ones (Windows 8+ has none; the game insists on two formats per
+      resolution). The window follows SetWindowPos/WS_POPUP; GetSystemMetrics is the real
+      display (tests `tests/d3d9_types.rs`)
+
 ## Open
 
-- [ ] Direct3D 9 pass-through (`d3d9.rs`): Direct3DCreate9, then the window's HWND
-      (`window::host_hwnd`) for CreateDevice. The game sizes its window to the desktop
-      (GetSystemMetrics: `user32::DESKTOP_W/H`, 1600x1200 now) and makes it WS_POPUP; the
-      winit window keeps the size of CreateWindowExA (320x240) so far
+- [ ] First frame: game_start needs DirectInput 7 (CoCreateInstance CLSID_DirectInput,
+      IID_IDirectInput7W; input_init 0x4ddcc0) and then a DirectShow filter graph for the
+      intro video before its first Present (Tasks 10 and 9 come before the first frame);
+      Present, Clear and `GUNMETAL_SHOT` are in place but not yet seen running in the game
+- [ ] Direct3D 9 still open: shaders, vertex declarations, render targets and other device
+      surfaces, cube/volume textures, state blocks, GetAdapterMonitor
 - [ ] DirectSound (`dsound.rs`: DirectSoundCreate8 says "no device" now), DirectShow
       (`ole32::register_class`)
 - [ ] Imports bound to "not implemented" (stop when called): CreateProcessA,

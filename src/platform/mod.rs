@@ -9,6 +9,7 @@
 pub mod advapi32;
 pub mod com;
 pub mod crt;
+#[cfg(windows)]
 pub mod d3d9;
 pub mod display;
 pub mod dsound;
@@ -271,6 +272,17 @@ pub fn thunk_not_implemented(name: &str, nargs: i32) -> u32 {
     a
 }
 
+/// Calls of `method_not_implemented` (never runs: `com_new` binds it as `thunk_not_implemented`).
+static NOT_IMPLEMENTED_CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// A COM method without an implementation, in a method table for `com_new`: its thunk returns
+/// 0 and logs its first call by name (as `thunk_not_implemented`).
+pub fn method_not_implemented(_: &mut Cpu) -> u32 {
+    // a body of its own, so the linker does not fold it with another function
+    NOT_IMPLEMENTED_CALLS.fetch_add(1, Ordering::Relaxed);
+    0
+}
+
 /// A guest address that runs `f` when called.
 pub fn thunk(name: &str, nargs: i32, f: ImpFn) -> u32 {
     thunk_add(name.to_string(), nargs, Some(f))
@@ -281,8 +293,9 @@ pub fn thunk(name: &str, nargs: i32, f: ImpFn) -> u32 {
 static VTABLES: Mutex<Vec<(usize, u32)>> = Mutex::new(Vec::new());
 
 /// A new COM object: a guest block whose first dword points at a guest vtable of thunks for
-/// `methods` (one vtable per method table, shared by all objects). `extra` bytes follow the
-/// vtable pointer for the caller's use.
+/// `methods` (one vtable per method table, shared by all objects; `method_not_implemented`
+/// entries are `thunk_not_implemented`). `extra` bytes follow the vtable pointer for the
+/// caller's use.
 pub fn com_new(methods: &'static [Import], extra: u32) -> u32 {
     let vt = {
         let key = methods.as_ptr() as usize;
@@ -292,7 +305,8 @@ pub fn com_new(methods: &'static [Import], extra: u32) -> u32 {
             None => {
                 let v = alloc(4 * methods.len() as u32);
                 for (k, &(name, n, f)) in methods.iter().enumerate() {
-                    mem().wr32(v + 4 * k as u32, thunk(name, n, f));
+                    let t = if f as usize == method_not_implemented as ImpFn as usize { thunk_not_implemented(name, n) } else { thunk(name, n, f) };
+                    mem().wr32(v + 4 * k as u32, t);
                 }
                 lock(&VTABLES).push((key, v));
                 v
@@ -431,7 +445,7 @@ fn on_event(c: &mut Cpu, e: Event) {
     match e {
         Event::Foreign(a) if (THUNK_LO..THUNK_LO + 4 * THUNK_N).contains(&a) => {
             let k = ((a - THUNK_LO) / 4) as usize;
-            let (f, nargs) = {
+            let (f, nargs, method) = {
                 let t = lock(&THUNKS);
                 let Some(th) = t.get(k) else { fatal(c, &format!("call to unused thunk {a:#x}")) };
                 if trace_api() {
@@ -446,7 +460,7 @@ fn on_event(c: &mut Cpu, e: Event) {
                                 log!("warn: {} is not implemented (returns 0)", th.name);
                             }
                         }
-                        (f, th.nargs)
+                        (f, th.nargs, th.name.contains("::"))
                     }
                     None => fatal(c, &format!("import {} is not implemented yet", th.name)),
                 }
@@ -456,6 +470,10 @@ fn on_event(c: &mut Cpu, e: Event) {
             turn_give();
             sample::IN_IMPORT.store(k + 1, Ordering::Relaxed);
             let r = f(c);
+            if method && trace_api() {
+                // COM methods: their HRESULT or count too
+                log!("  -> {r:#x}");
+            }
             sample::IN_IMPORT.store(0, Ordering::Relaxed);
             let t1 = prof().then(std::time::Instant::now);
             turn_take();
@@ -740,6 +758,7 @@ fn find_import(dll: &str, name: &str) -> Option<&'static Import> {
         "WINMM.DLL" => winmm::IMPORTS,
         "OLE32.DLL" => ole32::IMPORTS,
         "DSOUND.DLL" => dsound::IMPORTS,
+        #[cfg(windows)]
         "D3D9.DLL" => d3d9::IMPORTS,
         _ => &[],
     };
@@ -747,7 +766,7 @@ fn find_import(dll: &str, name: &str) -> Option<&'static Import> {
 }
 
 /// Game functions replaced by our own (`jit::compile`).
-pub const HOOKS: &[(u32, crate::rt::Hook)] = &[(crt::FTOL, crt::ftol)];
+pub const HOOKS: &[(u32, crate::rt::Hook)] = &[(crt::FTOL, crt::ftol), (crt::GAME_WARNING, crt::game_warning)];
 
 /// Copy a PE image into guest memory at its base (headers and sections) and bind its imports.
 fn load_image(img: &Image) {

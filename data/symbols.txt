@@ -70,9 +70,27 @@
 0x459240 cd_check?            (inside game_start, after a d3d_create failure branch) every drive of GetLogicalDrives with GetDriveTypeA 5 (CD-ROM) and a volume (GetVolumeInformationA, no label compared): fopen <drive>\gmsetup\data2.cab, fseek -1024 from the end, fread 128 bytes; needs 128 read and an offset above 0x3200000, else error string 16 and exit(1)
 0x557f00 assert_fail?         (expression, file, line)
 
+# Direct3D 9 set-up (DXSetup.cpp; the object at d3d_setup)
+0x469760 d3d_enum_adapters    every adapter: GetAdapterIdentifier, a list entry (0x34 bytes), d3d_enum_device for HAL (1), SW (3), REF (2) as the settings allow; then d3d_prune; fails ("No supported 3D card found") when no adapter is left
+0x469e20 d3d_enum_device      GetDeviceCaps (caps checks: 2 textures, 2048x2048, 3 streams, else "Not Supported: Card only supports ..." and the device is dropped); per resolution of d3d_mode_counts in the settings' range (640x480..1600x1200) one entry per display format with CheckDeviceType/Format, multisample and depth formats
+0x46c260 d3d_mode_counts      GetAdapterModeCount for X1R5G5B5, A1R5G5B5, R5G6B5, X8R8G8B8, A8R8G8B8
+0x46afd0 d3d_prune            drops devices with failed caps, and resolutions that have not exactly two display formats (16 and 32 bit; Windows 8 and later have no 16-bit modes: d3d9.rs offers them)
+0x469640 d3d_destroy          frees the adapter list and releases d3d9
+0x46ccd0 render_init?         d3d_enum_adapters (else d3d_destroy, false), tables
+0x548ad0 render_start?        render_init (via 0x486f30), then 0x54f190; false gives "Nicht unterstützte Grafikkarte."
+0x479e80 d3d_create_texture   IDirect3DDevice9::CreateTexture; a failure goes to d3d_error
+0x47ab30 d3d_error?           (HRESULT) after a failed device call
+0x557ce0 game_log             writes the first 5 messages (count at 0x76c288) to gunmetal.log in the game folder, with the adapter and version at the first
+0x557f40 game_warning         (message, expression, file, line): "Assertion Failed" text to game_log; hooked (crt.rs): every one goes to our log
+0x4ddcc0 input_init           DirectInput (0x4dcba0, 0x4dded0: CoCreateInstance CLSID_DirectInput, IID_IDirectInput7W), devices; false ends game_start (after "Joystick/joypad not found")
+0x586290 video_poll_events    IMediaEvent::GetEvent of the video's filter graph (videotexture.cpp; no graph: a null call)
+0x464ba0 video_update?        critical section, the video object's method +0xa4 (video_poll_events)
+
 # Start-up data
 0x664738 d3d_result           what d3d_create returned (game_start skips to an error message for 1 and 2)
 0x675390 d3d9                 the IDirect3D9
+0x675394 d3d_device           the IDirect3DDevice9
+0x6757e8 d3d_setup            the Direct3D set-up object (DXSetup.cpp): settings flags at +0x18, adapter list at +0x30, count at +0x2c
 0x76c474 cpu_mhz              the clock rate cpu_measure_mhz found; above 1100 a first start takes the fast-CPU default of setting +0x1234 (0x459904)
 0x72a458 proj_data            the project's data (getProjData(): error strings at +0x8d8, settings at +0x35c)
 
