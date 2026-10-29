@@ -259,13 +259,7 @@ fn get_drive_type(c: &mut Cpu) -> u32 {
 /// The CD's volume label: the one of the CD image (`super::cd_image`), else `CD_LABEL`.
 pub fn cd_label() -> &'static str {
     static L: OnceLock<String> = OnceLock::new();
-    L.get_or_init(|| match super::cd_image().and_then(crate::iso::Iso::open) {
-        Some(i) => {
-            log!("CD: {} (volume {})", super::cd_image().unwrap().display(), i.label);
-            i.label
-        }
-        None => CD_LABEL.to_string(),
-    })
+    L.get_or_init(|| super::cd_image().map_or_else(|| CD_LABEL.to_string(), |i| super::lock(i).label.clone()))
 }
 
 /// The volume label without a CD image. The game's CD check (0x459240) only needs
@@ -1183,13 +1177,17 @@ fn get_file_attributes(c: &mut Cpu) -> u32 {
             let ro = m.permissions().readonly() || super::on_cd(&name);
             (if m.is_dir() { 0x10 } else { 0x80 }) | ro as u32 // DIRECTORY or NORMAL, READONLY
         }
-        Err(_) => {
-            if super::trace_api() {
-                log!("GetFileAttributesA {name}: not found");
+        // what the game folder lacks on the CD: from the CD image, read-only (as CreateFileA)
+        Err(_) => match super::cd_entry(&name) {
+            Some(e) => (if e.dir { 0x10 } else { 0x80 }) | 1,
+            None => {
+                if super::trace_api() {
+                    log!("GetFileAttributesA {name}: not found");
+                }
+                set_last_error(ERROR_FILE_NOT_FOUND);
+                INVALID_HANDLE
             }
-            set_last_error(ERROR_FILE_NOT_FOUND);
-            INVALID_HANDLE
-        }
+        },
     }
 }
 

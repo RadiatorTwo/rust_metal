@@ -827,6 +827,12 @@ impl<'a, 'f> Lifter<'a, 'f> {
                 let d = self.b.ins().uextend(I32, df);
                 let d = self.b.ins().ishl_imm_u(d, 10);
                 v = self.b.ins().bor(v, d);
+                for (field, bit) in [(offset_of!(Cpu, ac), 18), (offset_of!(Cpu, id), 21)] {
+                    let f = self.b.ins().load(I8, mf(), self.cpu, field as i32);
+                    let f = self.b.ins().uextend(I32, f);
+                    let f = self.b.ins().ishl_imm_u(f, bit);
+                    v = self.b.ins().bor(v, f);
+                }
                 self.push32(v);
             }
             Popfd => {
@@ -837,6 +843,10 @@ impl<'a, 'f> Lifter<'a, 'f> {
                 }
                 let d = self.bit8(v, 10);
                 self.b.ins().store(mf(), d, self.cpu, offset_of!(Cpu, df) as i32);
+                for (field, bit) in [(offset_of!(Cpu, ac), 18), (offset_of!(Cpu, id), 21)] {
+                    let f = self.bit8(v, bit);
+                    self.b.ins().store(mf(), f, self.cpu, field as i32);
+                }
             }
             Lahf => {
                 let mut v = self.iconst(I32, 0x200);

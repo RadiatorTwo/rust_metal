@@ -58,7 +58,8 @@ only the EXE here, no engine DLL.
   instruction is missing, which ends the run with "unsupported instruction at ..: <it>").
   CPUID (`rt::rt_cpuid`) answers a Pentium Pro (GenuineIntel family 6: FPU, TSC, CX8, CMOV;
   no MMX/SSE/3DNow!, no extended leaves) so D3DX9 takes its x87 paths (it reads the bits at
-  0x5b6d74, 0x5b3bdb, 0x5b3b2b); IsProcessorFeaturePresent says no to everything.
+  0x5b6d74, 0x5b3bdb, 0x5b3b2b); IsProcessorFeaturePresent says no to everything. EFLAGS AC
+  and ID are kept by popfd/pushfd (`Cpu::ac`, `Cpu::id`); rdtsc is the host's TSC.
 - `src/smc.rs`: fields of instructions the game writes (none found in the EXE).
 - `src/rt.rs`: the CPU state, guest memory (4 GB reserved; guest address a = base + a),
   dispatch, events, x87 helpers. `GUNMETAL_COUNT=<file>`: functions count their calls.
@@ -79,8 +80,9 @@ winit, no GL: `host_hwnd` gives its HWND for Direct3D 9; Alt+Enter borderless fu
 `registry.txt`), `winmm.rs` (clock, timeSetEvent threads), `ole32.rs` (CoCreateInstance by
 CLSID: `ole32::register_class(clsid, create)` for later modules; an unknown CLSID gives
 REGDB_E_CLASSNOTREG and a log line), `dsound.rs` (DirectSoundCreate8 says no device),
-`d3d9.rs` (Direct3DCreate9: the run ends there for now), `crt.rs` (`__ftol` hooked),
-`sample.rs` (`GUNMETAL_SAMPLE=1` profiler). Imports without an implementation stop the run
+`d3d9.rs` (Direct3DCreate9: the run ends there for now, logging the MHz the game measured), `crt.rs` (`__ftol` hooked),
+`sample.rs` (`GUNMETAL_SAMPLE=1` profiler). MessageBoxA is the host's, over our window (scripted runs,
+`GUNMETAL_INPUT`, answer it at once with its first button). Imports without an implementation stop the run
 with "import X is not implemented yet" when called (listed at start: CreateProcessA,
 EnumSystemLocalesA, file mappings, CreateFileW).
 
@@ -89,14 +91,15 @@ guest path absolute against the current folder (at start `INSTALL_DIR`, C:\Spiel
 also in GetModuleFileNameA), strips the install folder or the CD drive, and matches each part
 case-insensitively in the game folder (`resolve_case`). D: is the CD drive: its paths mean the
 game folder, and what the game folder lacks is read from the CD image (`GunMetal.iso` in the
-game folder or above it, `cd_file`).
+game folder or above it, opened once: `cd_entry`, `cd_file`; CreateFileA and
+GetFileAttributesA use it).
 
 How the game starts (`GUNMETAL_TRACE_API=1` shows every import call):
 1. C runtime start-up (heap, TLS, critical sections, environment, code pages), then WinMain
-   (0x57a9b0) calls game_init (0x4579f0): CPU detection (the game's own finds no CPUID: the
-   lifter's pushfd/popfd do not keep the ID flag, so it also skips its 1 s speed measurement;
-   cpu_mhz stays 0, which only picks the "slow CPU" default of a detail setting at the first
-   start), CoInitialize, then d3d_create (0x469530): LoadLibraryA("d3d9.dll") ->
+   (0x57a9b0) calls game_init (0x4579f0): CPU detection (0x5633d0: the EFLAGS ID toggle test,
+   which pushfd/popfd keep, then CPUID and a 1 s busy measurement of rdtsc, the host's real
+   TSC, against timeGetTime: cpu_mhz, e.g. 3403; above 1100 a first start picks the fast-CPU
+   default of a detail setting at 0x459904), CoInitialize, then d3d_create (0x469530): LoadLibraryA("d3d9.dll") ->
    GetProcAddress("Direct3DCreate9") -> Direct3DCreate9(31). **The run ends here now**
    (Direct3D 9: next task).
 2. Seen with a stand-in IDirect3D9 (not kept): GetAdapterIdentifier; the window (FindWindowA,

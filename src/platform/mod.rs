@@ -71,6 +71,16 @@ pub fn cstr(a: u32) -> String {
     (0..).map(|k| m.rd8(a + k)).take_while(|&b| b != 0).map(|b| b as char).collect()
 }
 
+/// A NUL-terminated guest string in the game's code page, Windows-1252 (the German texts'
+/// quotes and dashes lie at 0x80-0x9f, where Latin-1 has control characters).
+pub fn cstr_1252(a: u32) -> String {
+    const HIGH: [char; 32] = [
+        '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž', '\u{8f}', '\u{90}', '‘', '’', '“', '”', '•', '–',
+        '—', '˜', '™', 'š', '›', 'œ', '\u{9d}', 'ž', 'Ÿ',
+    ];
+    cstr(a).chars().map(|c| if ('\u{80}'..='\u{9f}').contains(&c) { HIGH[c as usize - 0x80] } else { c }).collect()
+}
+
 /// Copy a string into a guest buffer of `n` bytes, NUL-terminated and cut to fit; returns the
 /// number of bytes copied without the NUL.
 pub fn put_cstr(a: u32, s: &str, n: u32) -> u32 {
@@ -106,7 +116,7 @@ struct Heap {
 static HEAP: Mutex<Heap> =
     Mutex::new(Heap { top: ARENA_LO, mapped: ARENA_LO, used: BTreeMap::new(), free_at: BTreeMap::new(), free_size: BTreeMap::new() });
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -587,25 +597,32 @@ pub fn on_cd(guest: &str) -> bool {
     full_path(guest).as_bytes()[0] == CD_DRIVE
 }
 
-/// The CD image: `GunMetal.iso` in the game folder or the folder above it.
-pub fn cd_image() -> Option<&'static Path> {
-    static P: OnceLock<Option<PathBuf>> = OnceLock::new();
-    P.get_or_init(|| {
+/// The CD image: `GunMetal.iso` in the game folder or the folder above it, opened once.
+pub fn cd_image() -> Option<&'static Mutex<crate::iso::Iso>> {
+    static I: OnceLock<Option<(PathBuf, Mutex<crate::iso::Iso>)>> = OnceLock::new();
+    I.get_or_init(|| {
         let dir = game_dir();
-        [Some(dir), dir.parent()].into_iter().flatten().map(|d| d.join("GunMetal.iso")).find(|p| p.is_file())
+        let path = [Some(dir), dir.parent()].into_iter().flatten().map(|d| d.join("GunMetal.iso")).find(|p| p.is_file())?;
+        let iso = crate::iso::Iso::open(&path)?;
+        log!("CD: {} (volume {})", path.display(), iso.label);
+        Some((path, Mutex::new(iso)))
     })
-    .as_deref()
+    .as_ref()
+    .map(|i| &i.1)
 }
 
-/// A file on the CD (a guest path on `CD_DRIVE`) read from the CD image, if there is one and
-/// it has the file.
-pub fn cd_file(guest: &str) -> Option<crate::iso::IsoFile> {
+/// The entry of a guest path on `CD_DRIVE` in the CD image, if there is one and it has it.
+pub fn cd_entry(guest: &str) -> Option<crate::iso::Entry> {
     if !on_cd(guest) {
         return None;
     }
-    let mut iso = crate::iso::Iso::open(cd_image()?)?;
-    let e = iso.lookup(&full_path(guest)[3..]).filter(|e| !e.dir)?;
-    iso.open_file(&e).ok()
+    lock(cd_image()?).lookup(&full_path(guest)[3..])
+}
+
+/// A file on the CD read from the CD image (see `cd_entry`).
+pub fn cd_file(guest: &str) -> Option<crate::iso::IsoFile> {
+    let e = cd_entry(guest).filter(|e| !e.dir)?;
+    lock(cd_image()?).open_file(&e).ok()
 }
 
 /// The guest's current folder (SetCurrentDirectoryA), the install folder at start.

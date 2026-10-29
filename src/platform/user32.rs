@@ -728,7 +728,8 @@ fn get_foreground_window(_: &mut Cpu) -> u32 {
     main_window()
 }
 
-/// RegisterWindowMessageA: one number from 0xc000 up per name, the same name the same number.
+/// RegisterWindowMessageA: one number from 0xc100 up per name, the same name the same number
+/// (0xc000 and up are window classes' atoms here).
 fn register_window_message(c: &mut Cpu) -> u32 {
     static NAMES: Mutex<Vec<String>> = Mutex::new(Vec::new());
     let name = cstr(arg(c, 0)).to_ascii_lowercase();
@@ -771,17 +772,34 @@ fn msg_wait_for_multiple_objects(c: &mut Cpu) -> u32 {
     }
 }
 
-/// MessageBoxA(owner, text, caption, type): logged, answered with its first button (IDOK,
-/// IDYES, IDABORT...).
+/// MessageBoxA(owner, text, caption, type): logged and shown by Windows over our window, with
+/// the game's buttons and icon; its answer is the game's. Scripted (`GUNMETAL_INPUT`, runs
+/// without anyone watching) it is answered at once with its first button.
 fn message_box(c: &mut Cpu) -> u32 {
-    let (text, caption, ty) = (cstr(arg(c, 1)), cstr(arg(c, 2)), arg(c, 3));
+    let (owner, text, caption, ty) = (arg(c, 0), super::cstr_1252(arg(c, 1)), super::cstr_1252(arg(c, 2)), arg(c, 3));
     log!("MessageBoxA \"{caption}\": {}", text.trim_end());
-    match ty & 0xf {
-        2 => 3,     // MB_ABORTRETRYIGNORE: IDABORT
-        3 | 4 => 6, // MB_YESNO(CANCEL): IDYES
-        5 => 4,     // MB_RETRYCANCEL: IDRETRY
-        _ => 1,     // IDOK
+    if std::env::var_os("GUNMETAL_INPUT").is_some() {
+        return match ty & 0xf {
+            2 => 3,     // MB_ABORTRETRYIGNORE: IDABORT
+            3 | 4 => 6, // MB_YESNO(CANCEL): IDYES
+            5 => 4,     // MB_RETRYCANCEL: IDRETRY
+            _ => 1,     // IDOK
+        };
     }
+    host_message_box(window::host_hwnd(owner), &text, &caption, ty)
+}
+
+#[cfg(windows)]
+fn host_message_box(hwnd: isize, text: &str, caption: &str, ty: u32) -> u32 {
+    use windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW;
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let (t, c) = (wide(text), wide(caption));
+    unsafe { MessageBoxW(hwnd as _, t.as_ptr(), c.as_ptr(), ty) as u32 }
+}
+
+#[cfg(not(windows))]
+fn host_message_box(_: isize, _: &str, _: &str, _: u32) -> u32 {
+    1
 }
 
 pub const IMPORTS: &[Import] = &[

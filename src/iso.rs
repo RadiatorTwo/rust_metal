@@ -17,7 +17,7 @@ pub struct Entry {
 pub struct Iso {
     /// bytes copied so far, and who hears of them after each file
     pub copied: u64,
-    pub progress: Option<Box<dyn FnMut(u64)>>,
+    pub progress: Option<Box<dyn FnMut(u64) + Send>>,
     file: File,
     /// bytes a sector in the file, and where its 2048 data bytes start
     sector_size: u64,
@@ -84,8 +84,14 @@ impl Iso {
 
     fn sector(&mut self, n: u32) -> std::io::Result<[u8; 2048]> {
         let mut b = [0u8; 2048];
-        self.file.seek(SeekFrom::Start(n as u64 * self.sector_size + self.data_at))?;
-        self.file.read_exact(&mut b)?;
+        let at = n as u64 * self.sector_size + self.data_at;
+        let mut got = 0;
+        while got < b.len() {
+            match read_at(&self.file, &mut b[got..], at + got as u64)? {
+                0 => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+                k => got += k,
+            }
+        }
         Ok(b)
     }
 
@@ -196,6 +202,14 @@ impl Iso {
     }
 }
 
+/// Read at a position of its own: the handles of one image (`Iso::open_file`) share theirs.
+fn read_at(f: &File, buf: &mut [u8], at: u64) -> std::io::Result<usize> {
+    #[cfg(windows)]
+    return std::os::windows::fs::FileExt::seek_read(f, buf, at);
+    #[cfg(unix)]
+    return std::os::unix::fs::FileExt::read_at(f, buf, at);
+}
+
 /// A file on the image, read in place (`Iso::open_file`).
 pub struct IsoFile {
     file: File,
@@ -214,8 +228,7 @@ impl Read for IsoFile {
         // up to the end of the sector the position is in (sectors of a raw image have headers)
         let (s, off) = (self.pos / 2048, self.pos % 2048);
         let n = (buf.len() as u64).min(2048 - off).min(self.size - self.pos) as usize;
-        self.file.seek(SeekFrom::Start((self.sector as u64 + s) * self.sector_size + self.data_at + off))?;
-        let n = self.file.read(&mut buf[..n])?;
+        let n = read_at(&self.file, &mut buf[..n], (self.sector as u64 + s) * self.sector_size + self.data_at + off)?;
         self.pos += n as u64;
         Ok(n)
     }

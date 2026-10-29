@@ -22,7 +22,8 @@ Updated 2026-10-29. Details on how things work: CLAUDE.md. Design:
       start-up to Direct3DCreate9, where the run ends (`d3d9.rs`). Paths case-insensitive
       (`resolve_case`, test `tests/paths.rs`)
 - [x] CPUID answered as a Pentium Pro without MMX/SSE/3DNow!: D3DX9 stays on its x87 paths;
-      no stub entry runs during start-up
+      no stub entry runs during start-up. The game's own detection sees CPUID (EFLAGS ID kept
+      by pushfd/popfd) and measures the real clock (rdtsc = host TSC: 3403 MHz here)
 - [x] CD check understood (0x459240: a CD-ROM drive with gmsetup\data2.cab over 52 MB) and
       answered: D: is a CD-ROM, its files the game folder's, and what the game folder lacks
       comes from `GunMetal.iso` (test `tests/iso.rs`); seen passing with a stand-in
@@ -36,9 +37,6 @@ Updated 2026-10-29. Details on how things work: CLAUDE.md. Design:
       winit window keeps the size of CreateWindowExA (320x240) so far
 - [ ] DirectSound (`dsound.rs`: DirectSoundCreate8 says "no device" now), DirectShow
       (`ole32::register_class`)
-- [ ] The game's own CPU speed is 0 (no CPUID seen: pushfd/popfd lose the ID flag), so a
-      first start picks the slow-CPU default of a detail setting (0x459904); decide whether
-      to report a speed
 - [ ] Imports bound to "not implemented" (stop when called): CreateProcessA,
       EnumSystemLocalesA, CreateFileW, CreateFileMappingA, MapViewOfFile, UnmapViewOfFile
 - [ ] MMX/3DNow!/SSE in the lifter: not needed while CPUID hides them

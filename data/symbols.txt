@@ -60,7 +60,7 @@
 0x57a9b0 WinMain              game_init, then the window (FindWindowA, RegisterClassA, CreateWindowExA "Gunmetal" 320x240, style 0xcf0000), then game_start
 0x4579f0 game_init            CPU detection (cpu_check), title "Gunmetal", CoInitialize, d3d_create (result in d3d_result), _srand?(0), callbacks 0x461df0 and 0x461e70 registered (0x57b580)
 0x5577d0 cpu_check            cpu_detect, then always true (the "P3 optimised version on CPU that does not support SIMD" refusal is compiled out)
-0x5633d0 cpu_detect           CPUID vendor and features (flags at 0x76c464..0x76c46c, unused), brand string, cpu_mhz
+0x5633d0 cpu_detect           only if EFLAGS ID toggles: CPUID vendor and features (flags at 0x76c464..0x76c46c, unused), brand string, cpu_mhz
 0x563150 cpu_features_intel   CPUID 1 edx bits to flags (SSE, SSE2, MMX, FPU, TSC, CMOV), brand string from 0x80000002..4
 0x563210 cpu_features_amd     as cpu_features_intel, plus 0x80000001 (3DNow!, 3DNow!+, MMX ext)
 0x5632f0 cpu_features_other   as cpu_features_intel for other vendors
@@ -73,7 +73,7 @@
 # Start-up data
 0x664738 d3d_result           what d3d_create returned (game_start skips to an error message for 1 and 2)
 0x675390 d3d9                 the IDirect3D9
-0x76c474 cpu_mhz
+0x76c474 cpu_mhz              the clock rate cpu_measure_mhz found; above 1100 a first start takes the fast-CPU default of setting +0x1234 (0x459904)
 0x72a458 proj_data            the project's data (getProjData(): error strings at +0x8d8, settings at +0x35c)
 
 # MFC

@@ -15,7 +15,10 @@ pub struct Cpu {
     pub sf: u8,
     pub of: u8,
     pub df: u8,
-    pub _pad: [u8; 2],
+    /// EFLAGS AC (bit 18) and ID (bit 21): no effect, but kept by popfd/pushfd, as programs
+    /// test whether they can toggle them (ID: whether CPUID exists, 0x5633d0)
+    pub ac: u8,
+    pub id: u8,
     /// guest address of the thread information block
     pub fs_base: u32,
     /// host address of guest address 0
@@ -58,7 +61,8 @@ impl Cpu {
             sf: 0,
             of: 0,
             df: 0,
-            _pad: [0; 2],
+            ac: 0,
+            id: 0,
             fs_base: 0,
             mem: mem.base,
             foreign: 0,
@@ -307,9 +311,16 @@ pub extern "C" fn rt_cpuid(cpu: *mut Cpu) {
     }
 }
 
+/// The host's time-stamp counter, as the original would read it: the game measures its CPU's
+/// clock rate with it against timeGetTime (0x563350).
 pub extern "C" fn rt_rdtsc(cpu: *mut Cpu) {
-    static START: OnceLock<std::time::Instant> = OnceLock::new();
-    let t = START.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64;
+    #[cfg(target_arch = "x86_64")]
+    let t = unsafe { core::arch::x86_64::_rdtsc() };
+    #[cfg(not(target_arch = "x86_64"))]
+    let t = {
+        static START: OnceLock<std::time::Instant> = OnceLock::new();
+        START.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64
+    };
     let c = unsafe { &mut *cpu };
     c.r[EAX] = t as u32;
     c.r[EDX] = (t >> 32) as u32;
