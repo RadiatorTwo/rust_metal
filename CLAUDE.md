@@ -170,8 +170,8 @@ How the game starts (`GUNMETAL_TRACE_API=1` shows every import call):
    (`game_files/Manual/Files/Images/Screens`). After ~40 s on the title the attract video
    (`attract_ps_h.wmv`, skipped: white) plays and the title returns. To the main menu:
    `GUNMETAL_INPUT="16000:Enter" GUNMETAL_SHOT=shot/menu.png` (16 s leaves the title time to
-   load; real mouse and keyboard input still reaches the game during scripted runs, so leave
-   the machine alone). Starting a mission (New game, slot, Arsenal "Starten", briefing) ends at
+   load; while `GUNMETAL_INPUT` is set the real keyboard and mouse are ignored,
+   `window::reaches_game`: only the close button and focus changes count). Starting a mission (New game, slot, Arsenal "Starten", briefing) ends at
    "call to unknown address 0x4d5a60" (an undiscovered function; Task 11).
    The menu's drawing: fixed function only (SetVertexShader(null)/SetPixelShader(null)); FVFs
    0x102 (XYZ|TEX1), 0x142 (XYZ|DIFFUSE|TEX1), 0x112 (XYZ|NORMAL|TEX1), 0x42 (XYZ|DIFFUSE),
@@ -197,7 +197,7 @@ How the game starts (`GUNMETAL_TRACE_API=1` shows every import call):
    (367 MB). Without an image the check fails unless the game folder has gmsetup\data2.cab.
 
 Env: `GUNMETAL_TRACE_API` (imports with arguments), `GUNMETAL_TRACE_REG`, `GUNMETAL_TRACE_MSG`,
-`GUNMETAL_INPUT` (scripted input, see `window.rs`), `GUNMETAL_WINDOW=WxH`,
+`GUNMETAL_INPUT` (scripted input, see `window.rs`; real keyboard and mouse ignored), `GUNMETAL_WINDOW=WxH`,
 `GUNMETAL_MONITOR=n`, `GUNMETAL_WATCH` (where the game is, every 2 s), `GUNMETAL_PROF`,
 `GUNMETAL_SAMPLE`, `GUNMETAL_COUNT=<file>`, `GUNMETAL_SHOT=shot/x.png` (the back buffer
 before Present, at most every `GUNMETAL_SHOT_MS`, 500; `{t}` in the name: ms since start;

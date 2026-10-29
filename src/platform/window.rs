@@ -2,6 +2,10 @@
 //! the window system's input as the game's terms. The game's own window is guest bookkeeping
 //! in `user32`; its window procedure stays guest code. Everything here lives on the game's
 //! main thread: the game creates its window and pumps its messages there.
+//!
+//! Scripted runs (`GUNMETAL_INPUT`) get only their script's keys and mouse: the real keyboard
+//! and mouse are ignored (`reaches_game`), so someone using the machine cannot steer a test
+//! run into a new game. The window's close button and focus changes still count.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -33,6 +37,18 @@ pub enum Input {
     Focus(bool),
     /// scripted only: a dword written to guest memory (address, value)
     Poke(u32, u32),
+}
+
+/// Whether input from the real keyboard, mouse and window reaches the game: in a scripted run
+/// (`GUNMETAL_INPUT`) only the window's close button and focus changes do.
+pub fn reaches_game(i: &Input, scripted: bool) -> bool {
+    !scripted || matches!(i, Input::Close | Input::Focus(_))
+}
+
+/// This run is scripted (`GUNMETAL_INPUT` is set).
+fn scripted_run() -> bool {
+    static S: OnceLock<bool> = OnceLock::new();
+    *S.get_or_init(|| std::env::var_os("GUNMETAL_INPUT").is_some())
 }
 
 struct App {
@@ -416,6 +432,13 @@ impl App {
         }
     }
 
+    /// Input from the real window, for the game unless a script drives this run.
+    fn real(&mut self, i: Input) {
+        if reaches_game(&i, scripted_run()) {
+            self.input.push_back(i);
+        }
+    }
+
     /// The cursor in client pixels of the game's size (the picture fills the window).
     fn game_pos(&self) -> (i32, i32) {
         let Some(win) = &self.window else { return (0, 0) };
@@ -438,15 +461,15 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, e: WindowEvent) {
         match e {
-            WindowEvent::CloseRequested => self.input.push_back(Input::Close),
-            WindowEvent::Focused(f) => self.input.push_back(Input::Focus(f)),
+            WindowEvent::CloseRequested => self.real(Input::Close),
+            WindowEvent::Focused(f) => self.real(Input::Focus(f)),
             WindowEvent::Resized(_) => self.keep_fullscreen(),
             // moved to another display while fullscreen: fill that one
             WindowEvent::Moved(_) => self.keep_fullscreen(),
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = position;
                 let (x, y) = self.game_pos();
-                self.input.push_back(Input::Move(x, y));
+                self.real(Input::Move(x, y));
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let lines = match delta {
@@ -454,7 +477,7 @@ impl ApplicationHandler for App {
                     winit::event::MouseScrollDelta::PixelDelta(p) => (p.y / 40.0).round() as i32,
                 };
                 if lines != 0 {
-                    self.input.push_back(Input::Wheel(lines));
+                    self.real(Input::Wheel(lines));
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -464,14 +487,14 @@ impl ApplicationHandler for App {
                     MouseButton::Middle => 2,
                     _ => return,
                 };
-                self.input.push_back(Input::Button(b, state == ElementState::Pressed));
+                self.real(Input::Button(b, state == ElementState::Pressed));
             }
             WindowEvent::ModifiersChanged(m) => self.alt = m.state().alt_key(),
             WindowEvent::KeyboardInput { event, .. } => {
                 let down = event.state == ElementState::Pressed;
                 if self.alt && matches!(event.physical_key, PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter)) {
                     // Alt+Enter: borderless fullscreen on the window's display, or back
-                    if down && !event.repeat {
+                    if down && !event.repeat && !scripted_run() {
                         if let Some(w) = &self.window {
                             let full = w.fullscreen().is_some();
                             w.set_fullscreen((!full).then(|| borderless(w)));
@@ -482,13 +505,13 @@ impl ApplicationHandler for App {
                 }
                 if let PhysicalKey::Code(code) = event.physical_key {
                     if let Some((vk, scan)) = vk_of(code) {
-                        self.input.push_back(Input::Key { vk, scan, down, repeat: event.repeat });
+                        self.real(Input::Key { vk, scan, down, repeat: event.repeat });
                     }
                 }
                 if down {
                     if let Some(t) = &event.text {
                         for ch in t.chars().filter(|&c| (c as u32) < 256) {
-                            self.input.push_back(Input::Char(ch as u8));
+                            self.real(Input::Char(ch as u8));
                         }
                     }
                 }

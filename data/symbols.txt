@@ -90,7 +90,11 @@
 0x478650 dynvb_draw?          SetStreamSource when the buffer changed, DrawPrimitive (the front end's quads: strips of 2 triangles)
 0x478760 dynvb_draw_indexed?  SetStreamSource, SetIndices, DrawIndexedPrimitive from the dynamic buffers
 0x4727f0 mesh_draw?           SetIndices, SetStreamSource, DrawIndexedPrimitive of a static (managed) mesh
-0x46f590 frame_begin?         Clear(Z and stencil, 0xff000080), BeginScene
+0x46f590 frame_begin?         TestCooperativeLevel (device lost: d3d_lost_release, unacquire input, lost flag 0x76d51d; not reset: Reset, d3d_restore), Clear(Z and stencil, 0xff000080), BeginScene
+0x46f190 d3d_lost_release     the game's device-lost handler: releases default-pool resources (event query 0x47b410, dynamic buffers 0x4747b0) and ten callbacks at +0x84ed0
+0x46f1f0 d3d_restore          after Reset: event query, dynamic buffers, render states, ten callbacks at +0x84ef8
+0x57ac90 msg_pump             PeekMessageA loop; GetMessageA (waits) while minimised (0x76d50a) or the device is lost (0x76d51d)
+0x57ae70 wnd_proc             the game's window procedure
 0x46f900 frame_end_scene?     EndScene (and a SetStreamSource)
 0x46fb90 frame_present?       Present
 0x557ce0 game_log             writes the first 5 messages (count at 0x76c288) to gunmetal.log in the game folder, with the adapter and version at the first

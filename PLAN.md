@@ -43,6 +43,9 @@ Updated 2026-10-29. Details on how things work: CLAUDE.md. Design:
       settings choose, and VMR9, in an experiment with video_use_vmr9 forced true) were seen
       passing (tests `tests/dshow.rs`)
 
+- [x] Scripted runs (`GUNMETAL_INPUT`) ignore the real keyboard and mouse; the close button
+      and focus changes still count (test `tests/input.rs`)
+
 - [x] Front end drawn (Task 6): cube textures, render targets and other device surfaces,
       vertex declarations, shaders (bytecode as it is), state blocks, every device method the
       front end calls, *UP draws in place; texture locks share one guest buffer per level;
@@ -54,8 +57,22 @@ Updated 2026-10-29. Details on how things work: CLAUDE.md. Design:
 
 - [ ] Starting a mission: "call to unknown address 0x4d5a60" after the briefing (an
       undiscovered function)
-- [ ] Scripted runs: real mouse and keyboard input still reaches the game (a run can wander
-      off when someone uses the machine)
+- [ ] Device loss (Task 7, postponed for gameplay): Alt+Tab, Win+D, lock screen (Win+L).
+      The game's path: frame_begin (0x46f590) asks TestCooperativeLevel every frame; at the
+      first answer that is not D3D_OK d3d_lost_release (0x46f190) releases the event query and
+      the dynamic vertex/index buffers (seen: all reach 0, our Release frees them); on
+      D3DERR_DEVICELOST it unacquires mouse and keyboard and sets the lost flag (0x76d51d), and
+      its message pump (0x57ac90) then waits in GetMessageA; on D3DERR_DEVICENOTRESET it calls
+      Reset, then d3d_restore (0x46f1f0). 0x470040, 0x46df40 and 0x47b1a0 (mode changes) have
+      their own waits. Tried: a scripted `minimize` (winit `set_minimized`) really loses the
+      device; `restore` (`set_minimized(false)` + `focus_window`: the window is in front again
+      at 1024x768) leaves TestCooperativeLevel at D3DERR_DEVICELOST for 8 s and more, so the
+      game never resets. Also needed: on regaining focus, post WM_ACTIVATEAPP/WM_ACTIVATE/
+      WM_SETFOCUS/WM_PAINT to wake the waiting pump (user32 sends nothing on Focus(true)
+      today; tried, wakes it). Next: find why D3D9 does not take the display back (exclusive
+      mode returns through the focus window's WM_ACTIVATEAPP; try ShowWindow SW_RESTORE +
+      SetForegroundWindow directly, or an outside helper). Manual checks for the user
+      afterwards: Alt+Tab, Win+D, Win+L and back
 - [ ] DirectInput: buffered keyboard data (GetDeviceData; the game uses it for short presses),
       joysticks (gamepads), the exclusive mouse's relative movement at the window's edge
 - [ ] Videos (`.wmv`) and music: the graph skips them now (`dshow.rs`)
