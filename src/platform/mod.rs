@@ -7,6 +7,7 @@
 //! puts its result in eax and removes the return address and (stdcall) arguments.
 
 pub mod advapi32;
+pub mod com;
 pub mod crt;
 pub mod d3d9;
 pub mod display;
@@ -776,15 +777,29 @@ fn load_image(img: &Image) {
     }
 }
 
+/// Reserve the guest address space (once) and map the thunk area; tests call this to use the
+/// heap and thunks without a game.
+pub fn init_memory() -> &'static Memory {
+    let m = MEM.get_or_init(|| {
+        let m = Memory::reserve();
+        m.map(THUNK_LO, THUNK_LO + 4 * THUNK_N);
+        m
+    });
+    m
+}
+
+/// The end of the guest heap's used range (for tests that check nothing leaks).
+pub fn heap_top() -> u32 {
+    lock(&HEAP).top
+}
+
 /// Load the EXE into a new guest address space, bind its imports, and run it on this thread
 /// (which needs a large stack: guest calls nest on it). Returns the exit code.
 pub fn run_game(game: &crate::game::Game, game_dir: PathBuf) -> u32 {
     let _ = GAME_DIR.set(game_dir);
-    let _ = MEM.set(Memory::reserve());
-    let m = mem();
+    let m = init_memory();
     m.map(TIB, TIB + 0x1000);
     m.map(STACK_LO, STACK_HI);
-    m.map(THUNK_LO, THUNK_LO + 4 * THUNK_N);
     m.map(RET_MAGIC, RET_MAGIC + 0x1000);
     init_tib(TIB, STACK_LO, STACK_HI);
     load_image(&game.exe);
