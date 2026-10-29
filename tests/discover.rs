@@ -60,3 +60,40 @@ fn finds_functions() {
     let found: Vec<u32> = find_functions(&mut code, &[(TEXT, "entry".into())]).iter().map(|f| f.0).collect();
     assert_eq!(found, vec![TEXT, at(&called), at(&pushed), at(&stored)]);
 }
+
+/// A switch's jump table right after a call that does not return (`_exit`), as MSVC lays it
+/// out: decoding must not run on into the table (whose bytes decode as `in`, which would make
+/// the function, known only from a pointer in data, look like data). Gun Metal's 0x4d5a60.
+#[test]
+fn table_after_noreturn_call() {
+    let f = TEXT + 0x10;
+    let (case0, case1, exit) = (TEXT + 0xe5, TEXT + 0xf0, TEXT + 0x100);
+    let mut text = vec![0xcc; 0x1000];
+    text[0] = 0xc3; // the entry: ret
+    let mut put = |at: u32, b: &[u8]| text[(at - TEXT) as usize..][..b.len()].copy_from_slice(b);
+    put(f, &[0x83, 0xf8, 0x01, 0x77, 0x07]); // cmp eax,1; ja default
+    put(f + 5, &[0xff, 0x24, 0x85]); // jmp [eax*4 + table]
+    put(f + 8, &(TEXT + 0x24).to_le_bytes());
+    put(f + 12, &[0x6a, 0x00, 0xe8]); // default: push 0; call exit
+    put(f + 15, &(exit - (f + 19)).to_le_bytes());
+    put(f + 19, &[0x90]);
+    put(TEXT + 0x24, &[case0.to_le_bytes(), case1.to_le_bytes()].concat()); // e5 .. = in eax,..
+    put(case0, &[0xb8, 1, 0, 0, 0, 0xc3]);
+    put(case1, &[0xb8, 2, 0, 0, 0, 0xc3]);
+    put(exit, &[0xeb, 0xfe]);
+    let mut data = f.to_le_bytes().to_vec();
+    data.resize(0x100, 0);
+    let n = data.len() as u32;
+    let img = Image {
+        data: [text, data].concat(),
+        base: 0x400000,
+        entry: TEXT,
+        sections: vec![
+            Section { name: ".text".into(), va: TEXT, vsize: 0x1000, raw: 0, rsize: 0x1000, exec: true },
+            Section { name: ".data".into(), va: DATA, vsize: n, raw: 0x1000, rsize: n, exec: false },
+        ],
+    };
+    let mut code = Code::new(&img);
+    let found: Vec<u32> = find_functions(&mut code, &[(TEXT, "entry".into())]).iter().map(|f| f.0).collect();
+    assert_eq!(found, vec![TEXT, f, exit]);
+}

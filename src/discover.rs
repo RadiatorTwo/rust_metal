@@ -40,6 +40,10 @@ pub struct Func {
     pub ins: BTreeSet<u32>,
     /// jmp [index*4 + table]: the instruction's address -> its targets
     pub tables: HashMap<u32, Vec<u32>>,
+    /// the bytes of those tables (start, end): MSVC puts them right after the function's
+    /// code, often behind a call that does not return (`_exit`), which decoding must not
+    /// run on into
+    pub table_bytes: Vec<(u32, u32)>,
     pub targets: HashSet<u32>,
     pub calls: HashSet<u32>,
 }
@@ -47,6 +51,11 @@ pub struct Func {
 impl Func {
     pub fn inside(&self, a: u32) -> bool {
         self.lo <= a && a < self.hi
+    }
+
+    /// Whether `a` is one of the function's jump tables.
+    pub fn in_table(&self, a: u32) -> bool {
+        self.table_bytes.iter().any(|&(lo, hi)| lo <= a && a < hi)
     }
 
     fn new(code: &mut Code, entry: u32, lo: u32, hi: u32, name: String) -> Func {
@@ -57,6 +66,7 @@ impl Func {
             name,
             ins: BTreeSet::new(),
             tables: HashMap::new(),
+            table_bytes: Vec::new(),
             targets: HashSet::new(),
             calls: HashSet::new(),
         };
@@ -70,7 +80,7 @@ impl Func {
             if !self.inside(pc) {
                 continue;
             }
-            while !self.ins.contains(&pc) {
+            while !self.ins.contains(&pc) && !self.in_table(pc) {
                 if !self.inside(pc) {
                     // runs on past the end: needs an entry there
                     self.targets.insert(pc);
@@ -103,7 +113,8 @@ impl Func {
                                         && p.op0_kind() == OpKind::Register
                                         && p.op0_register() == i.memory_index()
                                 });
-                            let tbl = self.table(code, i.memory_displacement32(), if neg { 8 } else { 4 });
+                            let (tbl, span) = self.table(code, i.memory_displacement32(), if neg { 8 } else { 4 });
+                            self.table_bytes.push(span);
                             for &t in &tbl {
                                 self.targets.insert(t);
                                 if self.inside(t) {
@@ -130,8 +141,8 @@ impl Func {
     }
 
     /// Jump table entries; MSVC's memcpy indexes some tables with negative values, so valid
-    /// entries just before the table count too.
-    fn table(&self, code: &Code, at: u32, back: u32) -> Vec<u32> {
+    /// entries just before the table count too. Also gives the bytes the table occupies.
+    fn table(&self, code: &Code, at: u32, back: u32) -> (Vec<u32>, (u32, u32)) {
         let mut out = Vec::new();
         for k in 1..=back {
             let t = code.img.u32(at - 4 * k);
@@ -157,8 +168,9 @@ impl Func {
             }
             fwd.push(t);
         }
+        let span = (at - 4 * out.len() as u32, at + 4 * fwd.len() as u32);
         out.extend(fwd.into_iter().filter(|&x| x != 0));
-        out
+        (out, span)
     }
 }
 
@@ -306,7 +318,7 @@ fn plausible(code: &mut Code, t: u32, seen: &(HashSet<u32>, HashSet<u32>)) -> bo
     let img = code.img;
     let Some(s) = img.sections.iter().find(|s| s.exec && t >= s.va && t < s.va + s.vsize) else { return false };
     let f = Func::new(code, t, s.va, s.va + s.vsize, String::new());
-    f.ins.iter().filter(|a| !seen.0.contains(a)).all(|&a| {
+    f.ins.iter().filter(|&&a| !seen.0.contains(&a) && !f.in_table(a)).all(|&a| {
         let i = code.at(a).unwrap();
         let odd = matches!(
             i.mnemonic(),
