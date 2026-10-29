@@ -41,7 +41,7 @@ The core is taken from rustschweine (2026-10-29) and made independent of Hogs of
 only the EXE here, no engine DLL.
 
 - `src/image.rs`: a PE file's sections (`exec`: holds code), imports, exports, resources.
-  `data/symbols.txt`: what we know, by address (empty so far).
+  `data/symbols.txt`: what we know, by address.
 - `src/game.rs`: loads `Gunmetal.exe` from the game folder after checking its SHA-256; seeds
   for finding the code: the entry point and every function of the Ghidra export.
 - `src/ghidra.rs`: reads the Ghidra function export, `data/gunmetal_functions.json` (from the
@@ -54,17 +54,71 @@ only the EXE here, no engine DLL.
 - `src/lift.rs`, `src/lift/x87.rs`: x86 -> Cranelift IR (registers as variables, one block
   per instruction, tail calls between functions, `rt_lookup` for indirect targets, x87 with
   rounding modes). Not lifted yet: MMX, 3DNow! and SSE (D3DX9's alternative code paths,
-  149 of 9793 entries are incomplete because of them; they compile with a stub where an
-  instruction is missing).
+  149 of 9793 entries are incomplete because of them; they compile with a stop where an
+  instruction is missing, which ends the run with "unsupported instruction at ..: <it>").
+  CPUID (`rt::rt_cpuid`) answers a Pentium Pro (GenuineIntel family 6: FPU, TSC, CX8, CMOV;
+  no MMX/SSE/3DNow!, no extended leaves) so D3DX9 takes its x87 paths (it reads the bits at
+  0x5b6d74, 0x5b3bdb, 0x5b3b2b); IsProcessorFeaturePresent says no to everything.
 - `src/smc.rs`: fields of instructions the game writes (none found in the EXE).
 - `src/rt.rs`: the CPU state, guest memory (4 GB reserved; guest address a = base + a),
   dispatch, events, x87 helpers. `GUNMETAL_COUNT=<file>`: functions count their calls.
 - `src/jit.rs`: compiles all functions; the machine code can be cached (`compile_cached`,
   `compiled.bin` in the game folder, keyed by our own binary and the EXE).
-- `src/iso.rs`: reading files from a CD image (.iso or raw .bin).
-- `src/platform.rs`: stand-in until the platform layer exists (an empty `HOOKS`, `cstr`).
-- `src/main.rs`: `gunmetal [game folder]` (default `game_files`): finds and compiles the code,
-  then stops ("platform layer not implemented yet").
+- `src/iso.rs`: reading files from a CD image (.iso or raw .bin): its label, files by path,
+  read in place (`IsoFile`).
+- `src/main.rs`: `gunmetal [game folder]` (default `game_files`): finds, compiles (cached)
+  and runs the game (`platform::run_game`).
+
+### Platform layer (`src/platform/`, from rustschweine, 2026-10-29)
+
+`mod.rs` (thunks for imports, guest heap, threads taking turns, calls into guest code, paths,
+system DLLs for LoadLibraryA/GetProcAddress), `kernel32.rs`, `user32.rs` (the game's window
+is guest bookkeeping, its window procedure guest code), `window.rs` (the real window with
+winit, no GL: `host_hwnd` gives its HWND for Direct3D 9; Alt+Enter borderless fullscreen,
+`display.rs` keeps the choice), `gdi32.rs` (a stock brush), `advapi32.rs` (registry in
+`registry.txt`), `winmm.rs` (clock, timeSetEvent threads), `ole32.rs` (CoCreateInstance by
+CLSID: `ole32::register_class(clsid, create)` for later modules; an unknown CLSID gives
+REGDB_E_CLASSNOTREG and a log line), `dsound.rs` (DirectSoundCreate8 says no device),
+`d3d9.rs` (Direct3DCreate9: the run ends there for now), `crt.rs` (`__ftol` hooked),
+`sample.rs` (`GUNMETAL_SAMPLE=1` profiler). Imports without an implementation stop the run
+with "import X is not implemented yet" when called (listed at start: CreateProcessA,
+EnumSystemLocalesA, file mappings, CreateFileW).
+
+Paths: the game uses paths relative to its folder ("data\init.ini"); `host_path` makes a
+guest path absolute against the current folder (at start `INSTALL_DIR`, C:\Spiele\Gun Metal,
+also in GetModuleFileNameA), strips the install folder or the CD drive, and matches each part
+case-insensitively in the game folder (`resolve_case`). D: is the CD drive: its paths mean the
+game folder, and what the game folder lacks is read from the CD image (`GunMetal.iso` in the
+game folder or above it, `cd_file`).
+
+How the game starts (`GUNMETAL_TRACE_API=1` shows every import call):
+1. C runtime start-up (heap, TLS, critical sections, environment, code pages), then WinMain
+   (0x57a9b0) calls game_init (0x4579f0): CPU detection (the game's own finds no CPUID: the
+   lifter's pushfd/popfd do not keep the ID flag, so it also skips its 1 s speed measurement;
+   cpu_mhz stays 0, which only picks the "slow CPU" default of a detail setting at the first
+   start), CoInitialize, then d3d_create (0x469530): LoadLibraryA("d3d9.dll") ->
+   GetProcAddress("Direct3DCreate9") -> Direct3DCreate9(31). **The run ends here now**
+   (Direct3D 9: next task).
+2. Seen with a stand-in IDirect3D9 (not kept): GetAdapterIdentifier; the window (FindWindowA,
+   RegisterClassA, CreateWindowExA "Gunmetal" 320x240, then data\init.ini, SetWindowLongA
+   WS_POPUP, SetWindowPos to the desktop size from GetSystemMetrics, ShowWindow); then
+   game_start (0x457ae0): data\init.pck, the CD check, data\persist.dat (created if missing),
+   the adapter's modes for formats 0x15..0x19 (none: "Nicht unterstützte Grafikkarte.", exit).
+3. Registry: the game reads none (its settings are data\init.ini and data\persist.dat); D3DX9
+   asks HKLM\Software\Microsoft\Direct3D for debug switches (DisableMMX), which do not exist.
+   `registry.txt` holds only our own settings (key HKLM\SOFTWARE\Rage\Gun Metal) and is written
+   only when there are any.
+4. CD check (0x459240 in game_start, skipped when d3d_create failed): every drive of
+   GetLogicalDrives with GetDriveTypeA 5 and a working GetVolumeInformationA (the label is not
+   compared) must have gmsetup\data2.cab with 128 bytes readable 1024 before its end and that
+   offset above 0x3200000 (52 MB), else error string 16 of data\errormsg.txt and exit(1). Our
+   answer: C: fixed, D: a CD-ROM labelled as the image ("NEW"), data2.cab read from the image
+   (367 MB). Without an image the check fails unless the game folder has gmsetup\data2.cab.
+
+Env: `GUNMETAL_TRACE_API` (imports with arguments), `GUNMETAL_TRACE_REG`, `GUNMETAL_TRACE_MSG`,
+`GUNMETAL_INPUT` (scripted input, see `window.rs`), `GUNMETAL_WINDOW=WxH`,
+`GUNMETAL_MONITOR=n`, `GUNMETAL_WATCH` (where the game is, every 2 s), `GUNMETAL_PROF`,
+`GUNMETAL_SAMPLE`, `GUNMETAL_COUNT=<file>`.
 
 Tools: `cargo run --release --example functions -- game_files [--gaps]` (find + compile,
 statistics), `examples/dis.rs <folder> <addr|all>`, `examples/ghidra.rs <folder> [json]`

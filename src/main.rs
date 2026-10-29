@@ -50,9 +50,9 @@ fn run() -> i32 {
             st.compile_ms
         );
     }
-    eprintln!("platform layer not implemented yet");
+    let code = rust_metal::platform::run_game(&game, dir);
     drop(compiled);
-    0
+    code as i32
 }
 
 /// What the compiled code depends on: this program (any change to the recompiler) and the

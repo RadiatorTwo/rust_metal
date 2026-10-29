@@ -3,6 +3,14 @@
 
 # C runtime
 0x5870ac __ftol
+0x5878c8 _sprintf?
+0x588035 _srand?
+0x588091 _exit?               ends the process with a code (after a fatal message box)
+0x5883b7 _fclose?
+0x588434 _fread?
+0x58854b _ftell?
+0x5886ce _fseek?
+0x5887b8 _fopen?
 0x5872d4 operator_new
 0x58764c __global_unwind2
 0x58768e __local_unwind2
@@ -48,10 +56,35 @@
 0x5cbcf0 __aullshr
 0x5cbd60 __alldiv
 
+# Start-up (in order; see CLAUDE.md)
+0x57a9b0 WinMain              game_init, then the window (FindWindowA, RegisterClassA, CreateWindowExA "Gunmetal" 320x240, style 0xcf0000), then game_start
+0x4579f0 game_init            CPU detection (cpu_check), title "Gunmetal", CoInitialize, d3d_create (result in d3d_result), _srand?(0), callbacks 0x461df0 and 0x461e70 registered (0x57b580)
+0x5577d0 cpu_check            cpu_detect, then always true (the "P3 optimised version on CPU that does not support SIMD" refusal is compiled out)
+0x5633d0 cpu_detect           CPUID vendor and features (flags at 0x76c464..0x76c46c, unused), brand string, cpu_mhz
+0x563150 cpu_features_intel   CPUID 1 edx bits to flags (SSE, SSE2, MMX, FPU, TSC, CMOV), brand string from 0x80000002..4
+0x563210 cpu_features_amd     as cpu_features_intel, plus 0x80000001 (3DNow!, 3DNow!+, MMX ext)
+0x5632f0 cpu_features_other   as cpu_features_intel for other vendors
+0x563350 cpu_measure_mhz      rdtsc over 1000 ms of timeGetTime (busy waiting) -> cpu_mhz
+0x469530 d3d_create           LoadLibraryA d3d9.dll (else d3d9d.dll), Direct3DCreate9(31) -> d3d9, GetAdapterIdentifier(0); returns 0, 1 (no DLL) or 2 (no Direct3D 9)
+0x457ae0 game_start           data\init.ini, data\gamevars.ini, data\errormsg.txt, data\init.pck, the CD check (0x459240), data\persist.dat, the adapter's modes ("Nicht unterstützte Grafikkarte." when none)
+0x459240 cd_check?            (inside game_start, after a d3d_create failure branch) every drive of GetLogicalDrives with GetDriveTypeA 5 (CD-ROM) and a volume (GetVolumeInformationA, no label compared): fopen <drive>\gmsetup\data2.cab, fseek -1024 from the end, fread 128 bytes; needs 128 read and an offset above 0x3200000, else error string 16 and exit(1)
+0x557f00 assert_fail?         (expression, file, line)
+
+# Start-up data
+0x664738 d3d_result           what d3d_create returned (game_start skips to an error message for 1 and 2)
+0x675390 d3d9                 the IDirect3D9
+0x76c474 cpu_mhz
+0x72a458 proj_data            the project's data (getProjData(): error strings at +0x8d8, settings at +0x35c)
+
 # MFC
 0x406130 CRect
 
 # D3DX9
+0x5b3b06 d3dx_cpuid_mmx       CPUID 1 edx bit 23
+0x5b3b2b d3dx_use_mmx         not if HKLM\Software\Microsoft\Direct3D DisableMMX, else GetSystemInfo (Intel, level >= 5) and CPUID MMX; at 0x650270
+0x5b3bdb d3dx_cpu_features    CPUID 1 edx SSE (4), SSE2 (8)
+0x5b6d74 d3dx_cpu_flags       CPUID: 0x20 MMX, 0x40 SSE, 0x80 3DNow!, 0x100 3DNow!+ (extended leaves)
+0x5a192b d3dx_reg_dword       a DWORD of HKLM\Software\Microsoft\Direct3D (debug switches)
 
 # other
 0x588c8f entry

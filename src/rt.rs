@@ -296,10 +296,14 @@ pub extern "C" fn rt_trap(cpu: *mut Cpu, addr: u32, kind: u32) {
 
 pub extern "C" fn rt_cpuid(cpu: *mut Cpu) {
     let c = unsafe { &mut *cpu };
-    // a plain Pentium with FPU, TSC and MMX
+    // A Pentium Pro (GenuineIntel, family 6 model 1): FPU, TSC, CX8 and CMOV, but no MMX, SSE
+    // or 3DNow! (no extended leaves), which the lifter does not have. D3DX9 inside the game
+    // picks its MMX/SSE/3DNow! code paths from these bits (0x5b6d74, 0x5b3bdb, 0x5b3b06) and
+    // takes its x87 ones; the game's own detection (0x5633d0) only notes the CPU.
     match c.r[EAX] {
         0 => c.r[..4].copy_from_slice(&[1, 0x756e6547, 0x6c65746e, 0x49656e69]),
-        _ => c.r[..4].copy_from_slice(&[0x543, 0, 0, 0x0080_8111]),
+        1 => c.r[..4].copy_from_slice(&[0x611, 0, 0, 0x0000_8111]),
+        _ => c.r[..4].copy_from_slice(&[0, 0, 0, 0]),
     }
 }
 

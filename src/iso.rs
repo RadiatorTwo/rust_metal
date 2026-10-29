@@ -24,6 +24,8 @@ pub struct Iso {
     data_at: u64,
     joliet: bool,
     root: Entry,
+    /// the volume label (Joliet's when there is one, as Windows shows it)
+    pub label: String,
 }
 
 /// The layouts an image can have: (sector size, data offset).
@@ -42,6 +44,7 @@ impl Iso {
                 data_at,
                 joliet: false,
                 root: Entry::default(),
+                label: String::new(),
             };
             if iso.descriptors().is_some() {
                 return Some(iso);
@@ -62,12 +65,15 @@ impl Iso {
             match d[0] {
                 1 if !found => {
                     self.root = record(&d[156..], false)?;
+                    self.label = d[40..72].iter().map(|&b| b as char).collect::<String>().trim_end().to_string();
                     found = true;
                 }
                 // Joliet: a supplementary descriptor with the escape sequence %/@, %/C or %/E
                 2 if d[88] == b'%' && d[89] == b'/' && b"@CE".contains(&d[90]) => {
                     self.root = record(&d[156..], true)?;
                     self.joliet = true;
+                    let ucs: Vec<u16> = d[40..72].chunks(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+                    self.label = String::from_utf16_lossy(&ucs).split(char::from(0)).next().unwrap_or("").trim_end().to_string();
                 }
                 0xff => break,
                 _ => {}
@@ -108,6 +114,20 @@ impl Iso {
     /// The entry called `name` (any case) in `dir`.
     pub fn get(&mut self, dir: &Entry, name: &str) -> Option<Entry> {
         self.list(dir).ok()?.into_iter().find(|e| e.name.eq_ignore_ascii_case(name))
+    }
+
+    /// The entry at a path below the root ("gmsetup\data2.cab", parts in any case).
+    pub fn lookup(&mut self, path: &str) -> Option<Entry> {
+        let mut e = self.root();
+        for part in path.split(['\\', '/']).filter(|s| !s.is_empty() && *s != ".") {
+            e = self.get(&e, part)?;
+        }
+        Some(e)
+    }
+
+    /// A file of the image to read and seek in, on a handle of its own.
+    pub fn open_file(&self, e: &Entry) -> std::io::Result<IsoFile> {
+        Ok(IsoFile { file: self.file.try_clone()?, sector_size: self.sector_size, data_at: self.data_at, sector: e.sector, size: e.size as u64, pos: 0 })
     }
 
     /// The first file called `name` in `dir` or below, with its folder.
@@ -173,6 +193,46 @@ impl Iso {
             }
         }
         Ok(())
+    }
+}
+
+/// A file on the image, read in place (`Iso::open_file`).
+pub struct IsoFile {
+    file: File,
+    sector_size: u64,
+    data_at: u64,
+    sector: u32,
+    pub size: u64,
+    pos: u64,
+}
+
+impl Read for IsoFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos >= self.size || buf.is_empty() {
+            return Ok(0);
+        }
+        // up to the end of the sector the position is in (sectors of a raw image have headers)
+        let (s, off) = (self.pos / 2048, self.pos % 2048);
+        let n = (buf.len() as u64).min(2048 - off).min(self.size - self.pos) as usize;
+        self.file.seek(SeekFrom::Start((self.sector as u64 + s) * self.sector_size + self.data_at + off))?;
+        let n = self.file.read(&mut buf[..n])?;
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl Seek for IsoFile {
+    fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+        let p = match to {
+            SeekFrom::Start(p) => p as i64,
+            SeekFrom::Current(d) => self.pos as i64 + d,
+            SeekFrom::End(d) => self.size as i64 + d,
+        };
+        if p < 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek before the start"));
+        }
+        self.pos = p as u64;
+        Ok(self.pos)
     }
 }
 
