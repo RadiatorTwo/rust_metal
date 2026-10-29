@@ -42,14 +42,29 @@ struct Locked {
 /// Open locks by (guest object, level), the latest last.
 static LOCKS: Mutex<Option<HashMap<(u32, u32), Vec<Locked>>>> = Mutex::new(None);
 
-/// Start a lock of (`this`, `level`): `size` host bytes at `host` are the guest's at `guest`
-/// (copied there unless the lock discards them).
+/// Start a lock of (`this`, `level`): `size` host bytes at `host` are the guest's at `guest`,
+/// copied there unless the lock discards them. Bytes another open lock of it already covers
+/// are not copied: the guest buffer holds them as the game wrote them through that lock (in
+/// D3D9 both locks' pointers are the same memory).
 pub fn begin_lock(this: u32, level: u32, guest: u32, host: *mut c_void, size: usize, flags: u32) {
-    if lock_copy_in(flags) && size != 0 {
-        mem().slice(guest, size).copy_from_slice(unsafe { std::slice::from_raw_parts(host as *const u8, size) });
-    }
     let mut locks = lock(&LOCKS);
-    locks.get_or_insert_with(HashMap::new).entry((this, level)).or_default().push(Locked { host: host as usize, guest, size, flags });
+    let open = locks.get_or_insert_with(HashMap::new).entry((this, level)).or_default();
+    if lock_copy_in(flags) {
+        let (lo, hi) = (guest as u64, guest as u64 + size as u64);
+        let mut covered: Vec<(u64, u64)> = open.iter().map(|l| (l.guest as u64, l.guest as u64 + l.size as u64)).filter(|&(a, b)| a < hi && b > lo).collect();
+        covered.sort_unstable();
+        // the gaps between the covered ranges
+        let mut at = lo;
+        for (a, b) in covered.into_iter().chain([(hi, hi)]) {
+            if a > at {
+                let n = (a.min(hi) - at) as usize;
+                let src = unsafe { std::slice::from_raw_parts((host as *const u8).add((at - lo) as usize), n) };
+                mem().slice(at as u32, n).copy_from_slice(src);
+            }
+            at = at.max(b);
+        }
+    }
+    open.push(Locked { host: host as usize, guest, size, flags });
 }
 
 /// End the latest lock of (`this`, `level`): its guest bytes to the host (unless read-only).
@@ -193,8 +208,17 @@ fn lock_rect_common(
         return hr(r);
     }
     let pitch = lr.Pitch as usize;
-    // a whole level of unknown format: all its rows of pitch bytes
-    let size = lock_bytes(format, w, h, pitch).unwrap_or(h as usize * pitch);
+    // a whole level of unknown format: all its rows of pitch bytes (too many for an unknown
+    // block-compressed FourCC, but within the host's allocation)
+    let size = lock_bytes(format, w, h, pitch).unwrap_or_else(|| {
+        static SEEN: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+        let mut seen = lock(&SEEN);
+        if !seen.contains(&format) {
+            seen.push(format);
+            log!("warn: LockRect of format {format:#x} (size unknown): {h} rows of the pitch copied");
+        }
+        h as usize * pitch
+    });
     let guest = com::shadow(this, level, size as u32);
     begin_lock(this, level, guest, lr.pBits, size, flags);
     m.wr32(out, lr.Pitch as u32);
