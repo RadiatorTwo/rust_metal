@@ -158,6 +158,8 @@ impl Memory {
 /// trampoline the host enters guest code through.
 pub struct Dispatch {
     pub table: Vec<(u32, usize)>,
+    /// `table` as a direct table, for `rt_lookup`
+    pub direct: Direct,
     pub foreign_stub: usize,
     pub enter: extern "C" fn(*mut Cpu, *const u8),
     /// hooked functions (sorted): the host function and the recompiled original
@@ -175,17 +177,48 @@ fn die(msg: String) -> ! {
     std::process::exit(101)
 }
 
+/// The host code for every guest address from the lowest recompiled entry to the highest (the
+/// game's .text, ~1.9 million addresses): one slot per byte address, holding the entry's code
+/// or the foreign stub. Indirect calls and jumps (~6 million a second in a mission, mostly
+/// virtual calls) find their target with one bounds check and one load instead of a binary
+/// search over ~9800 entries. Full host pointers (~15 MB) rather than u32 offsets into the JIT
+/// code: its memory is not promised to be one region within 4 GB, and the size does not matter.
+pub struct Direct {
+    lo: u32,
+    slots: Box<[usize]>,
+    foreign: usize,
+}
+
+impl Direct {
+    /// From the (guest address, host code) entries; `foreign` for every other address.
+    pub fn new(table: &[(u32, usize)], foreign: usize) -> Direct {
+        let lo = table.iter().map(|e| e.0).min().unwrap_or(0);
+        let len = table.iter().map(|e| (e.0 - lo) as usize + 1).max().unwrap_or(0);
+        let mut slots = vec![foreign; len].into_boxed_slice();
+        for &(a, p) in table {
+            slots[(a - lo) as usize] = p;
+        }
+        Direct { lo, slots, foreign }
+    }
+
+    /// The code for `addr`; for an address without an entry the foreign stub, and `addr` goes
+    /// to `foreign` (`Cpu::foreign`, which the stub passes on).
+    #[inline(always)]
+    pub fn resolve(&self, addr: u32, foreign: &mut u32) -> usize {
+        // below `lo` wraps around to a large index: out of range as well
+        let p = self.slots.get(addr.wrapping_sub(self.lo) as usize).copied().unwrap_or(self.foreign);
+        if p == self.foreign {
+            *foreign = addr;
+        }
+        p
+    }
+}
+
 /// The function to run for a guest address: a recompiled function, or the foreign stub,
 /// which passes the address on to `rt_foreign`.
 pub extern "C" fn rt_lookup(cpu: *mut Cpu, addr: u32) -> *const u8 {
     let d = DISPATCH.get().expect("dispatch table not set");
-    match d.table.binary_search_by_key(&addr, |e| e.0) {
-        Ok(k) => d.table[k].1 as *const u8,
-        Err(_) => {
-            unsafe { (*cpu).foreign = addr };
-            d.foreign_stub as *const u8
-        }
-    }
+    d.direct.resolve(addr, unsafe { &mut (*cpu).foreign }) as *const u8
 }
 
 /// Nonzero while a guest thread waits for its turn (see `platform`): generated code checks it
@@ -734,4 +767,53 @@ fn floor24(s: f64, err: i32) -> f64 {
     };
     // s itself representable but the exact value just below it: the 24-bit float below s
     if floor(s) == s && err < 0 { floor(s.next_down()) } else { floor(s) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Direct;
+
+    const FOREIGN: usize = 0xf0f0;
+
+    fn direct() -> Direct {
+        Direct::new(&[(0x401000, 0x1000), (0x401010, 0x2000), (0x5e3300, 0x3000)], FOREIGN)
+    }
+
+    #[test]
+    fn hit() {
+        let d = direct();
+        let mut foreign = 7;
+        assert_eq!(d.resolve(0x401000, &mut foreign), 0x1000);
+        assert_eq!(d.resolve(0x401010, &mut foreign), 0x2000);
+        assert_eq!(d.resolve(0x5e3300, &mut foreign), 0x3000);
+        assert_eq!(foreign, 7, "a hit leaves cpu.foreign alone");
+    }
+
+    #[test]
+    fn miss_inside_span() {
+        let d = direct();
+        let mut foreign = 0;
+        assert_eq!(d.resolve(0x401001, &mut foreign), FOREIGN);
+        assert_eq!(foreign, 0x401001);
+        assert_eq!(d.resolve(0x5e32ff, &mut foreign), FOREIGN);
+        assert_eq!(foreign, 0x5e32ff);
+    }
+
+    #[test]
+    fn miss_outside_span() {
+        let d = direct();
+        let mut foreign = 0;
+        for a in [0, 0x400fff, 0x5e3301, 0x7ffe0000, u32::MAX] {
+            assert_eq!(d.resolve(a, &mut foreign), FOREIGN);
+            assert_eq!(foreign, a);
+        }
+    }
+
+    #[test]
+    fn empty() {
+        let d = Direct::new(&[], FOREIGN);
+        let mut foreign = 0;
+        assert_eq!(d.resolve(0x401000, &mut foreign), FOREIGN);
+        assert_eq!(foreign, 0x401000);
+    }
 }

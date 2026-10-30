@@ -65,6 +65,11 @@ only the EXE here, no engine DLL.
 - `src/smc.rs`: fields of instructions the game writes (none found in the EXE).
 - `src/rt.rs`: the CPU state, guest memory (4 GB reserved; guest address a = base + a),
   dispatch, events, x87 helpers. `GUNMETAL_COUNT=<file>`: functions count their calls.
+  Dispatch: `rt_lookup` (every indirect call or jump, ~6 million a second in a mission) reads
+  `Direct`, a table with one host code pointer per guest address from the lowest entry to the
+  highest (~1.9 million slots, 15 MB, built in `compile_cached` for cached code too): an
+  entry's code or the foreign stub (then `Cpu::foreign` = the address). `Dispatch::table`
+  (sorted pairs) stays for the sampler and crash reports.
 - `src/jit.rs`: compiles all functions; the machine code can be cached (`compile_cached`,
   `compiled.bin` in the game folder, keyed by our own binary and the EXE).
 - `src/iso.rs`: reading files from a CD image (.iso or raw .bin): its label, files by path,
@@ -110,7 +115,7 @@ guest shadow of the whole buffer, first part at the lock's offset, a wrapped sec
 the host's bytes copied in, the game's out at Unlock; SetNotificationPositions maps each guest event
 to a host event whose thread sets the guest one, `host_event`), `d3d9/` (Direct3D 9 passed through
 to the system's d3d9.dll, see below), `crt.rs` (`__ftol` hooked; the game's warning report 0x557f40
-goes to our log as "game: ..."), `sample.rs` (`GUNMETAL_SAMPLE=1` profiler), `video.rs` (the Video
+goes to our log as "game: ..."), `sample.rs` (`GUNMETAL_SAMPLE=1` profiler; `=54000` starts it after 54 s), `video.rs` (the Video
 menu offers every display mode, not only up to 1600x1200; the monitor and the game's 4:3 picture are
 the back buffer's own shape: Hor+ widescreen in missions, the 4:3 menus in the middle), `hud.rs`
 (the HUD laid out for a screen 768 pixels high and scaled up: as big as at 1024x768), `fps.rs` (the

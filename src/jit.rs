@@ -293,7 +293,8 @@ pub fn compile_cached(prog: &Program, smc: &Smc, code: &mut Code, hooks: &[(u32,
         .filter_map(|&(a, h)| Some((a, h, module.get_finalized_function(*originals.get(&a)?) as usize)))
         .collect();
     hooks.sort_unstable_by_key(|h| h.0);
-    let _ = DISPATCH.set(Dispatch { table, foreign_stub, enter, hooks });
+    let direct = rt::Direct::new(&table, foreign_stub);
+    let _ = DISPATCH.set(Dispatch { table, direct, foreign_stub, enter, hooks });
     Compiled { _module: module, enter, fns, stats }
 }
 

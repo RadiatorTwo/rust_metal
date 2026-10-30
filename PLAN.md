@@ -149,9 +149,15 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
 - [ ] Smooth pictures, left at the tick (small): water (0x530da0, its waves if they move),
       the radar's dots (0x444035, 0x4440e6), a trail's texture scroll (+0x98); look at it
       in play (does anything still shake?)
-- [ ] Frame rate, later: a frame-rate limit setting; performance for 480 fps (now ~6-8 ms a
+- [ ] Frame rate, later: a frame-rate limit setting; performance for 480 fps (now ~5.4 ms a
       frame in a mission); the game's demo recorder (Demo/recordDemo, playDemo) to compare
-      the same play at two rates
+      the same play at two rates. Profile and ranked fixes:
+      `.superpowers/perf/2026-10-30-mission-profile.md` (local, git-ignored). Done (P1, 2026-10-30): indirect
+      dispatch through a direct table (`rt::Direct`) instead of a binary search: rt_lookup
+      14.2 % -> 1.5 % of the main thread, the profile's mission script ~154 -> ~185 fps
+      (6.5 -> 5.4 ms a picture). Next: an inline target check at indirect call sites (or the
+      table read inline in generated code, skipping the host call), then fix 2 (flags around
+      calls) and 3 (static x87 TOP)
 - [ ] Resolution, still open: the door transition is stretched to a wider back buffer; the
       menu background's scrolling text shows faintly beside the 4:3 middle; the radar is
       wider than round (it follows the screen's width); our own resolution setting (the

@@ -2,7 +2,9 @@
 //! main thread 1000 times a second, reads where it is (its host instruction pointer), and
 //! counts the recompiled guest function there, or the import being run, or the host helper (else
 //! the module it is in and the first of our functions found on its stack: a driver, ntdll waiting);
-//! the top of the list is logged every 2 s.
+//! the top of the list is logged every 2 s. `GUNMETAL_SAMPLE=<ms>` (above 1) starts sampling only
+//! that many ms after start: sampling from the start slows the menus enough to throw a scripted
+//! run off.
 
 use super::log;
 use std::collections::HashMap;
@@ -17,11 +19,11 @@ pub fn start() {
     use windows_sys::Win32::System::Threading::{
         GetCurrentThreadId, OpenThread, ResumeThread, SuspendThread, THREAD_GET_CONTEXT, THREAD_SUSPEND_RESUME,
     };
-    if std::env::var_os("GUNMETAL_SAMPLE").is_none() {
-        return;
-    }
+    let Some(v) = std::env::var_os("GUNMETAL_SAMPLE") else { return };
+    let delay = v.to_str().and_then(|v| v.parse::<u64>().ok()).filter(|&ms| ms > 1).unwrap_or(0);
     let h = unsafe { OpenThread(THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME, 0, GetCurrentThreadId()) } as usize;
     std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(delay));
         let Some(d) = crate::rt::DISPATCH.get() else { return };
         let mut fns: Vec<(usize, u32)> = d.table.iter().map(|&(g, p)| (p, g)).collect();
         fns.sort_unstable();
