@@ -1350,18 +1350,45 @@ fn system_time_to_file_time(c: &mut Cpu) -> u32 {
     1
 }
 
-/// FileTimeToLocalFileTime: local time is UTC (as GetTimeZoneInformation says).
+// Local time is the host's: GetLocalTime, FileTimeToLocalFileTime and GetTimeZoneInformation
+// ask Windows, so they agree with each other (the game stamps its save slots with GetLocalTime).
+// Elsewhere local time is UTC.
+
+/// FileTimeToLocalFileTime.
 fn file_time_to_local_file_time(c: &mut Cpu) -> u32 {
     let ft = rd_file_time(arg(c, 0));
+    #[cfg(windows)]
+    let ft = {
+        use windows_sys::Win32::Foundation::FILETIME;
+        let utc = FILETIME { dwLowDateTime: ft as u32, dwHighDateTime: (ft >> 32) as u32 };
+        let mut local = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        if unsafe { windows_sys::Win32::Storage::FileSystem::FileTimeToLocalFileTime(&utc, &mut local) } == 0 {
+            return 0;
+        }
+        local.dwLowDateTime as u64 | (local.dwHighDateTime as u64) << 32
+    };
     mem().wr32(arg(c, 1), ft as u32);
     mem().wr32(arg(c, 1) + 4, (ft >> 32) as u32);
     1
 }
 
-/// GetSystemTime and GetLocalTime: the time in UTC (as the time zone says).
+/// GetSystemTime: the time in UTC.
 fn get_system_time(c: &mut Cpu) -> u32 {
     wr_system_time(arg(c, 0), system_time_of(file_time(std::time::SystemTime::now())));
     0
+}
+
+/// GetLocalTime: the host's local time.
+fn get_local_time(c: &mut Cpu) -> u32 {
+    #[cfg(windows)]
+    {
+        let mut st = unsafe { std::mem::zeroed::<windows_sys::Win32::Foundation::SYSTEMTIME>() };
+        unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut st) };
+        wr_system_time(arg(c, 0), [st.wYear, st.wMonth, st.wDayOfWeek, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds]);
+        0
+    }
+    #[cfg(not(windows))]
+    get_system_time(c)
 }
 
 // ---- misc ---------------------------------------------------------------------------------------
@@ -1372,9 +1399,24 @@ fn interlocked_exchange(c: &mut Cpu) -> u32 {
     mem().wr32(p, v);
     old
 }
+/// GetTimeZoneInformation: the host's (TIME_ZONE_INFORMATION has the same 172 bytes in 32
+/// and 64 bits); elsewhere none, UTC.
 fn get_time_zone_information(c: &mut Cpu) -> u32 {
-    mem().slice(arg(c, 0), 172).fill(0);
-    0 // TIME_ZONE_ID_UNKNOWN: UTC
+    let out = mem().slice(arg(c, 0), 172);
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
+        const _: () = assert!(std::mem::size_of::<TIME_ZONE_INFORMATION>() == 172);
+        let mut tz = unsafe { std::mem::zeroed::<TIME_ZONE_INFORMATION>() };
+        let r = unsafe { GetTimeZoneInformation(&mut tz) };
+        out.copy_from_slice(unsafe { std::slice::from_raw_parts(&tz as *const _ as *const u8, 172) });
+        r
+    }
+    #[cfg(not(windows))]
+    {
+        out.fill(0);
+        0 // TIME_ZONE_ID_UNKNOWN: UTC
+    }
 }
 
 /// GlobalMemoryStatus(MEMORYSTATUS): 512 MB of memory, half of it free, as a PC of 2002.
@@ -1441,7 +1483,7 @@ pub const IMPORTS: &[Import] = &[
     ("IsBadWritePtr", 2, ret0),
     ("IsBadCodePtr", 1, ret0),
     ("GetTimeZoneInformation", 1, get_time_zone_information),
-    ("GetLocalTime", 1, get_system_time),
+    ("GetLocalTime", 1, get_local_time),
     ("GetSystemTime", 1, get_system_time),
     ("FileTimeToSystemTime", 2, file_time_to_system_time),
     ("SystemTimeToFileTime", 2, system_time_to_file_time),
