@@ -545,11 +545,6 @@ fn get_window_long(c: &mut Cpu) -> u32 {
 
 fn set_window_long(c: &mut Cpu) -> u32 {
     let (h, i, v) = (arg(c, 0), arg(c, 1) as i32, arg(c, 2));
-    if i == -16 && h == main_window() {
-        // the real window has a frame and title bar while the game's has a caption
-        const WS_CAPTION: u32 = 0x00c0_0000;
-        window::set_decorated(v & WS_CAPTION == WS_CAPTION);
-    }
     let mut s = st();
     let Some(w) = s.wins.get_mut(&h) else { return 0 };
     let f = match i {
@@ -730,8 +725,13 @@ fn unhook(c: &mut Cpu) -> u32 {
 fn load_resource_handle(_: &mut Cpu) -> u32 {
     0x5500
 }
+/// ShowCursor(show): the display count; below 0 the cursor is hidden over our window.
 fn show_cursor(c: &mut Cpu) -> u32 {
-    if arg(c, 0) != 0 { 1 } else { 0xffff_ffff }
+    static COUNT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+    let d = if arg(c, 0) != 0 { 1 } else { -1 };
+    let n = COUNT.fetch_add(d, std::sync::atomic::Ordering::Relaxed) + d;
+    window::set_cursor_hidden(n < 0);
+    n as u32
 }
 
 /// EnumWindows(callback, lparam): our windows, until the callback returns FALSE.

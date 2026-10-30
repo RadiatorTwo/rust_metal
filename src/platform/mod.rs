@@ -15,11 +15,14 @@ pub mod dinput;
 pub mod display;
 pub mod dshow;
 pub mod dsound;
+pub mod fps;
 pub mod gdi32;
+pub mod hud;
 pub mod kernel32;
 pub mod ole32;
 pub mod sample;
 pub mod user32;
+pub mod video;
 pub mod window;
 pub mod winmm;
 
@@ -778,7 +781,31 @@ fn find_import(dll: &str, name: &str) -> Option<&'static Import> {
 }
 
 /// Game functions replaced by our own (`jit::compile`).
-pub const HOOKS: &[(u32, crate::rt::Hook)] = &[(crt::FTOL, crt::ftol), (crt::GAME_WARNING, crt::game_warning)];
+pub const HOOKS: &[(u32, crate::rt::Hook)] = &{
+    const N: usize = 2 + fps::HOOKS.len() + video::HOOKS.len() + hud::HOOKS.len();
+    let mut h: [(u32, crate::rt::Hook); N] = [(crt::FTOL, crt::ftol); N];
+    h[1] = (crt::GAME_WARNING, crt::game_warning);
+    let mut n = 2;
+    let mut i = 0;
+    while i < fps::HOOKS.len() {
+        h[n] = fps::HOOKS[i];
+        n += 1;
+        i += 1;
+    }
+    let mut i = 0;
+    while i < video::HOOKS.len() {
+        h[n] = video::HOOKS[i];
+        n += 1;
+        i += 1;
+    }
+    let mut i = 0;
+    while i < hud::HOOKS.len() {
+        h[n] = hud::HOOKS[i];
+        n += 1;
+        i += 1;
+    }
+    h
+};
 
 /// Copy a PE image into guest memory at its base (headers and sections) and bind its imports.
 fn load_image(img: &Image) {

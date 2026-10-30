@@ -169,28 +169,79 @@ pub fn host_back_buffer_format(format: u32, windowed: bool, no_16bit_modes: bool
 
 /// CreateDevice or Reset (`what`, `call`) with the game's present parameters at `pp`: the
 /// back buffer format as the host's (`host_back_buffer_format`), the results written back
-/// with the game's own format. Fullscreen, input positions are in back buffer pixels; back
-/// in a window, in the window's.
+/// with the game's own format. The host's device is always windowed: what the game asks for
+/// as fullscreen is a back buffer of that size shown in our window, which is a window or
+/// borderless fullscreen (Alt+Enter), never exclusive fullscreen (the display mode stays the
+/// desktop's); the game sees its own fullscreen parameters back. Fullscreen, input positions
+/// are in back buffer pixels; back in a window, in the window's.
 pub(crate) fn with_present_params(pp: u32, no_16bit: bool, what: &str, call: impl FnOnce(&mut D3DPRESENT_PARAMETERS) -> windows::core::HRESULT) -> windows::core::HRESULT {
     let m = mem();
     let mut params = present_params_from_guest(m, pp, super::window::host_hwnd);
     log!("d3d9: {what}: {}", describe(&params));
     let game_format = params.BackBufferFormat.0;
-    let host_format = host_back_buffer_format(game_format, params.Windowed.0 != 0, no_16bit);
+    let (game_windowed, game_refresh) = (params.Windowed, params.FullScreen_RefreshRateInHz);
+    let host_format = host_back_buffer_format(game_format, game_windowed.0 != 0, no_16bit);
     params.BackBufferFormat = D3DFORMAT(host_format);
+    params.Windowed = windows::core::BOOL(1);
+    params.FullScreen_RefreshRateInHz = 0;
     let r = call(&mut params);
     if params.BackBufferFormat.0 == host_format {
         params.BackBufferFormat = D3DFORMAT(game_format);
     }
+    (params.Windowed, params.FullScreen_RefreshRateInHz) = (game_windowed, game_refresh);
     present_params_to_guest(m, pp, &params, super::window::guest_hwnd);
     if r.is_err() {
         log!("warn: {what} failed: {:#x}", r.0);
-    } else if params.Windowed.0 == 0 {
+        return r;
+    }
+    BACK_BUFFER.store((params.BackBufferWidth as u64) << 32 | params.BackBufferHeight as u64, std::sync::atomic::Ordering::Relaxed);
+    if game_windowed.0 == 0 {
         super::window::set_game_size(params.BackBufferWidth, params.BackBufferHeight);
     } else {
         super::window::windowed_game_size();
     }
     r
+}
+
+/// The device's back buffer size (width << 32 | height), for Present.
+static BACK_BUFFER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Where Present puts the back buffer in the window `hwnd`: its picture rectangle
+/// (`window::picture`, the aspect ratio kept); the bars around it are painted black. None
+/// when the picture fills the client area or there is none.
+pub(crate) fn letterbox(hwnd: HWND) -> Option<windows::Win32::Foundation::RECT> {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::{BLACK_BRUSH, FillRect, GetDC, GetStockObject, HBRUSH, ReleaseDC};
+    let mut client = windows_sys::Win32::Foundation::RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    if hwnd.is_invalid() || unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd.0, &mut client) } == 0 {
+        return None;
+    }
+    let (cw, ch) = (client.right.max(0), client.bottom.max(0));
+    let v = BACK_BUFFER.load(std::sync::atomic::Ordering::Relaxed);
+    let back = ((v >> 32) as u32, v as u32);
+    if cw == 0 || ch == 0 || back.0 == 0 || back.1 == 0 {
+        return None;
+    }
+    let [x, y, w, h] = super::window::picture((cw as u32, ch as u32), back);
+    if (w, h) == (cw, ch) {
+        return None;
+    }
+    // the bars: left and right, or above and below
+    let bars = if x > 0 {
+        [RECT { left: 0, top: 0, right: x, bottom: ch }, RECT { left: x + w, top: 0, right: cw, bottom: ch }]
+    } else {
+        [RECT { left: 0, top: 0, right: cw, bottom: y }, RECT { left: 0, top: y + h, right: cw, bottom: ch }]
+    };
+    unsafe {
+        let dc = GetDC(Some(hwnd));
+        if !dc.is_invalid() {
+            for r in &bars {
+                FillRect(dc, r, HBRUSH(GetStockObject(BLACK_BRUSH).0));
+            }
+            ReleaseDC(Some(hwnd), dc);
+        }
+    }
+    Some(RECT { left: x, top: y, right: x + w, bottom: y + h })
 }
 
 /// A display format the game asks about, as the host's.

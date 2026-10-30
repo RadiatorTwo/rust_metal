@@ -103,13 +103,17 @@ fn reset(c: &mut Cpu) -> u32 {
 }
 
 /// Present(source rect, dest rect, window, dirty region): the back buffer, written to
-/// GUNMETAL_SHOT first when one is due.
+/// GUNMETAL_SHOT first when one is due. Without a rectangle of the game's, the picture keeps
+/// its aspect ratio in our window (`letterbox`).
 fn present(c: &mut Cpu) -> u32 {
     let (p, v) = dv(c);
     super::shot::before_present(p);
     let w = arg(c, 3);
     let win = if w == 0 { HWND::default() } else { super::host_hwnd(w) };
-    hr(unsafe { (v.Present)(p, cp(arg(c, 1)), cp(arg(c, 2)), win, cp(arg(c, 4))) })
+    let target = if w == 0 { super::host_hwnd(crate::platform::user32::main_window()) } else { win };
+    let dest = if arg(c, 2) == 0 { super::letterbox(target) } else { None };
+    let dest_ptr = dest.as_ref().map_or(cp(arg(c, 2)), |r| r as *const _);
+    hr(unsafe { (v.Present)(p, cp(arg(c, 1)), dest_ptr, win, cp(arg(c, 4))) })
 }
 
 fn set_gamma_ramp(c: &mut Cpu) -> u32 {

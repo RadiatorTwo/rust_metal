@@ -54,10 +54,12 @@ fn scripted_run() -> bool {
 struct App {
     /// the window to open at the next pump: title and client size
     want: Option<(String, u32, u32)>,
-    /// the game made its window a popup (no frame and title bar)
-    popup: bool,
     /// a fullscreen Direct3D device sets `game_size` (its back buffer), not SetWindowPos
     device_fullscreen: bool,
+    /// the back buffer size the window was last fitted to (`set_game_size`)
+    fitted: (u32, u32),
+    /// the game hid the cursor (ShowCursor)
+    cursor_hidden: bool,
     window: Option<Window>,
     /// the client size the game asked for (input positions are in its pixels)
     game_size: (u32, u32),
@@ -100,8 +102,9 @@ fn with_host<R>(f: impl FnOnce(&mut Host) -> R) -> R {
                 event_loop: b.build().expect("cannot open the window system"),
                 app: App {
                     want: None,
-                    popup: false,
                     device_fullscreen: false,
+                    fitted: (0, 0),
+                    cursor_hidden: false,
                     window: None,
                     game_size: (640, 480),
                     input: VecDeque::new(),
@@ -143,41 +146,73 @@ pub fn guest_hwnd(host: isize) -> u32 {
     if host != 0 && host == *HWND.lock().unwrap() { super::user32::main_window() } else { 0 }
 }
 
-/// The game moved or sized its main window (SetWindowPos; desktop coordinates, the desktop
-/// being the display the window is on): the real window follows unless it is fullscreen, and
-/// input positions are in pixels of the new size. Gun Metal makes its window a popup the
-/// size of the desktop (GetSystemMetrics) before it creates its Direct3D device.
-pub fn place(x: i32, y: i32, w: u32, h: u32) {
+/// The game sized its main window (SetWindowPos): input positions are in pixels of the new
+/// size until it has a fullscreen device. The real window does not follow: Gun Metal makes
+/// its window a popup the size of the desktop (GetSystemMetrics) before it creates its device;
+/// ours stays a window of the device's size, or borderless fullscreen (Alt+Enter).
+pub fn place(_x: i32, _y: i32, w: u32, h: u32) {
+    if !on_main() {
+        return;
+    }
+    with_host(|host| {
+        if !host.app.device_fullscreen {
+            host.app.game_size = (w.max(1), h.max(1));
+        }
+    });
+}
+
+/// A fullscreen Direct3D device of w x h (CreateDevice, Reset; on the host it is windowed):
+/// input positions are in its pixels until the device is windowed again; SetWindowPos no
+/// longer changes that. A window that is not fullscreen gets a client area of that size,
+/// centred on its display, when the size is new.
+pub fn set_game_size(w: u32, h: u32) {
     if !on_main() {
         return;
     }
     let (w, h) = (w.max(1), h.max(1));
     with_host(|host| {
-        if !host.app.device_fullscreen {
-            host.app.game_size = (w, h);
+        host.app.device_fullscreen = true;
+        host.app.game_size = (w, h);
+        if host.app.fitted == (w, h) || std::env::var_os("GUNMETAL_WINDOW").is_some() {
+            return;
         }
-        if let Some(want) = &mut host.app.want {
-            (want.1, want.2) = (w, h);
-        }
+        host.app.fitted = (w, h);
         let Some(win) = &host.app.window else { return };
         if win.fullscreen().is_some() {
             return;
         }
-        let origin = win.current_monitor().map_or(PhysicalPosition::new(0, 0), |m| m.position());
-        win.set_outer_position(PhysicalPosition::new(origin.x + x, origin.y + y));
         let _ = win.request_inner_size(PhysicalSize::new(w, h));
+        if let (Some(m), Ok(inner), Ok(outer)) = (win.current_monitor(), win.inner_position(), win.outer_position()) {
+            // the frame's left and top edge around the client area
+            let frame = (inner.x - outer.x, inner.y - outer.y);
+            let x = m.position().x + (m.size().width as i32 - w as i32) / 2 - frame.0;
+            let y = m.position().y + ((m.size().height as i32 - h as i32) / 2 - frame.1).max(0);
+            win.set_outer_position(PhysicalPosition::new(x, y));
+        }
     });
 }
 
-/// A fullscreen Direct3D device of w x h (CreateDevice, Reset): input positions are in its
-/// pixels until the device is windowed again; SetWindowPos no longer changes that.
-pub fn set_game_size(w: u32, h: u32) {
+/// Where the game's picture of `game` pixels goes in a client area of `client` pixels:
+/// x, y, width, height, as large as fits with the picture's aspect ratio, centred (black
+/// bars at the sides or above and below).
+pub fn picture(client: (u32, u32), game: (u32, u32)) -> [i32; 4] {
+    let (cw, ch) = (client.0.max(1) as u64, client.1.max(1) as u64);
+    let (gw, gh) = (game.0.max(1) as u64, game.1.max(1) as u64);
+    // the whole width unless that makes the picture too high
+    let (w, h) = if cw * gh <= ch * gw { (cw, (cw * gh + gw / 2) / gw) } else { ((ch * gw + gh / 2) / gh, ch) };
+    [((cw - w) / 2) as i32, ((ch - h) / 2) as i32, w as i32, h as i32]
+}
+
+/// The game hides (ShowCursor FALSE) or shows the cursor: over our window only.
+pub fn set_cursor_hidden(hidden: bool) {
     if !on_main() {
         return;
     }
     with_host(|host| {
-        host.app.device_fullscreen = true;
-        host.app.game_size = (w.max(1), h.max(1));
+        host.app.cursor_hidden = hidden;
+        if let Some(w) = &host.app.window {
+            w.set_cursor_visible(!hidden);
+        }
     });
 }
 
@@ -191,20 +226,6 @@ pub fn windowed_game_size() {
     with_host(|host| {
         host.app.device_fullscreen = false;
         host.app.game_size = (((r[2] - r[0]).max(1)) as u32, ((r[3] - r[1]).max(1)) as u32);
-    });
-}
-
-/// The game set its main window's style (SetWindowLongA GWL_STYLE): without a caption it is a
-/// popup, and the real window loses its frame and title bar.
-pub fn set_decorated(decorated: bool) {
-    if !on_main() {
-        return;
-    }
-    with_host(|host| {
-        host.app.popup = !decorated;
-        if let Some(win) = &host.app.window {
-            win.set_decorations(decorated);
-        }
     });
 }
 
@@ -399,7 +420,7 @@ impl App {
             .ok()
             .and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?))))
             .unwrap_or((w, h));
-        let attrs = Window::default_attributes().with_title(title).with_inner_size(PhysicalSize::new(size.0, size.1)).with_decorations(!self.popup);
+        let attrs = Window::default_attributes().with_title(title).with_inner_size(PhysicalSize::new(size.0, size.1));
         // GUNMETAL_MONITOR=1: opened on that display (0 the first; tests)
         let attrs = match std::env::var("GUNMETAL_MONITOR").ok().and_then(|v| v.parse::<usize>().ok()).and_then(|i| el.available_monitors().nth(i)) {
             Some(m) => attrs.with_position(PhysicalPosition::new(m.position().x + 50, m.position().y + 50)),
@@ -414,6 +435,7 @@ impl App {
         // to the front, while our start window still has the foreground (Windows lets only the
         // foreground's process bring a window forward)
         win.focus_window();
+        win.set_cursor_visible(!self.cursor_hidden);
         *HWND.lock().unwrap() = hwnd_of(&win);
         self.window = Some(win);
     }
@@ -439,13 +461,14 @@ impl App {
         }
     }
 
-    /// The cursor in client pixels of the game's size (the picture fills the window).
+    /// The cursor in client pixels of the game's size (in the picture, `picture`).
     fn game_pos(&self) -> (i32, i32) {
         let Some(win) = &self.window else { return (0, 0) };
         let size = win.inner_size();
         let (w, h) = self.game_size;
-        let x = (self.cursor.x * w as f64 / size.width.max(1) as f64).clamp(0.0, w as f64 - 1.0);
-        let y = (self.cursor.y * h as f64 / size.height.max(1) as f64).clamp(0.0, h as f64 - 1.0);
+        let [px, py, pw, ph] = picture((size.width, size.height), (w, h));
+        let x = ((self.cursor.x - px as f64) * w as f64 / pw.max(1) as f64).clamp(0.0, w as f64 - 1.0);
+        let y = ((self.cursor.y - py as f64) * h as f64 / ph.max(1) as f64).clamp(0.0, h as f64 - 1.0);
         (x as i32, y as i32)
     }
 }

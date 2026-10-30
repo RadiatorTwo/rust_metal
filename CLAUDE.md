@@ -78,9 +78,11 @@ only the EXE here, no engine DLL.
 system DLLs for LoadLibraryA/GetProcAddress), `kernel32.rs`, `user32.rs` (the game's window
 is guest bookkeeping, its window procedure guest code; GetSystemMetrics reports the size of
 the display the window is on), `window.rs` (the real window with winit, no GL: `host_hwnd`
-gives its HWND for Direct3D 9; it follows the game's SetWindowPos (`place`, also the size
-input positions are scaled to) and WS_POPUP (`set_decorated`); Alt+Enter borderless
-fullscreen, `display.rs` keeps the choice), `gdi32.rs` (a stock brush), `advapi32.rs` (registry in
+gives its HWND for Direct3D 9; it does not follow the game's SetWindowPos or WS_POPUP
+(`place` only sets the size input positions are scaled to): it is a framed window that a
+device's back buffer size fits (`set_game_size`, centred), or borderless fullscreen;
+Alt+Enter switches, `display.rs` keeps the choice, fullscreen by default; ShowCursor hides
+the cursor over it), `gdi32.rs` (a stock brush), `advapi32.rs` (registry in
 `registry.txt`), `winmm.rs` (clock, timeSetEvent threads), `ole32.rs` (CoCreateInstance by
 CLSID: built-in DirectInput, filter graph and VMR9, and `ole32::register_class(clsid, create)`
 for later modules; an unknown CLSID gives REGDB_E_CLASSNOTREG and a log line), `dinput.rs`
@@ -90,7 +92,12 @@ videos and sound files are skipped, Run posts EC_COMPLETE and the position is th
 graph is the object later tasks play music through), `dsound.rs` (DirectSoundCreate8 says no device),
 `d3d9/` (Direct3D 9 passed through to the system's d3d9.dll, see below), `crt.rs` (`__ftol`
 hooked; the game's warning report 0x557f40 goes to our log as "game: ..."),
-`sample.rs` (`GUNMETAL_SAMPLE=1` profiler). MessageBoxA is the host's, over our window (scripted runs,
+`sample.rs` (`GUNMETAL_SAMPLE=1` profiler), `video.rs` (the Video menu offers every display mode, not
+only up to 1600x1200; a camera's 4:3 means the back buffer's own shape: Hor+ widescreen),
+`hud.rs` (the HUD laid out for a screen 768 pixels high and scaled up: as big as at 1024x768), `fps.rs` (the frame rate: missions are uncapped with
+40 ms logic ticks; the camera, model nodes, particles and trails are drawn interpolated between the last two
+ticks, registry `Smooth` = 0 turns it off; `GUNMETAL_STEPS=1` logs where the step is asked
+outside ticks). MessageBoxA is the host's, over our window (scripted runs,
 `GUNMETAL_INPUT`, answer it at once with its first button). Imports without an implementation stop the run
 with "import X is not implemented yet" when called (listed at start: CreateProcessA,
 EnumSystemLocalesA, file mappings, CreateFileW).
@@ -105,8 +112,12 @@ copied without the host's padding (1100 bytes). Methods without an implementatio
 with `GUNMETAL_TRACE_API` COM methods also log their result ("-> 0x..."). CreateDevice adds
 D3DCREATE_MULTITHREADED and, when it succeeds without D3DCREATE_FPU_PRESERVE, sets the
 calling thread's x87 control word as real D3D9 and Wine do: 24-bit precision, rounding to
-nearest, exceptions masked (`fpu_after_create_device`). A fullscreen device makes input
-positions its back buffer's pixels (`window::set_game_size`) until a Reset to windowed.
+nearest, exceptions masked (`fpu_after_create_device`). Never exclusive fullscreen: the host
+device is always windowed (`with_present_params`; the game sees its own fullscreen
+parameters back, the display mode stays the desktop's), and Present puts the back buffer
+into our window with its aspect ratio, black bars painted with GDI (`letterbox`,
+`window::picture`). A fullscreen device of the game's makes input positions its back
+buffer's pixels (`window::set_game_size`) until a Reset to windowed.
 16-bit display modes: the game wants every resolution in exactly two display formats
 (d3d_prune 0x46afd0; XP drivers had R5G6B5 and X8R8G8B8); Windows 8 and later have no 16-bit
 modes, so when the adapter has none, R5G6B5 modes are offered as the X8R8G8B8 ones and
@@ -205,7 +216,7 @@ How the game starts (`GUNMETAL_TRACE_API=1` shows every import call):
 Env: `GUNMETAL_TRACE_API` (imports with arguments), `GUNMETAL_TRACE_REG`, `GUNMETAL_TRACE_MSG`,
 `GUNMETAL_INPUT` (scripted input, see `window.rs`; real keyboard and mouse ignored), `GUNMETAL_WINDOW=WxH`,
 `GUNMETAL_MONITOR=n`, `GUNMETAL_WATCH` (where the game is, every 2 s), `GUNMETAL_PROF`,
-`GUNMETAL_SAMPLE`, `GUNMETAL_COUNT=<file>`, `GUNMETAL_SHOT=shot/x.png` (the back buffer
+`GUNMETAL_SAMPLE`, `GUNMETAL_STEPS`, `GUNMETAL_COUNT=<file>`, `GUNMETAL_SHOT=shot/x.png` (the back buffer
 before Present, at most every `GUNMETAL_SHOT_MS`, 500; `{t}` in the name: ms since start;
 `shot/` is git-ignored: game imagery is never committed).
 

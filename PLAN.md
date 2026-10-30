@@ -1,6 +1,6 @@
 # Plan — what is done, what is open
 
-Updated 2026-10-29. Details on how things work: CLAUDE.md. Design:
+Updated 2026-10-30. Details on how things work: CLAUDE.md. Design:
 `docs/superpowers/specs/2026-10-29-rust-metal-design.md`.
 
 ## Done
@@ -53,8 +53,6 @@ Updated 2026-10-29. Details on how things work: CLAUDE.md. Design:
       `xlat` lifted. The title screen and the main menu look like the manual's screenshots
       and the game idles in the menu (tests `tests/d3d9_lock.rs`, `tests/misc.rs`)
 
-## Open
-
 - [x] Missions start and run (Task 11): 0x4d5a60 was missed because MSVC put a switch's
       jump table right after a call to `_exit`; decoding ran on into the table, whose bytes
       decode as `in`, so `plausible` rejected the function. Fix: a function's jump tables stop
@@ -63,42 +61,62 @@ Updated 2026-10-29. Details on how things work: CLAUDE.md. Design:
       mission choice, arsenal, briefing, the first mission "Stunde X" with HUD, radar, enemies,
       the suit walking, turning and firing, explosions, damage; "Einsatz fehlgeschlagen" after
       ~95 s of scripted play (with a device Reset); a save created at the pilot ID and loaded
-      after a restart. No sound (DirectSound fails; the game goes on). Not done: finishing a
-      mission (needs a human), saving after a won mission
-- [ ] Mission open points: GetLocalTime returns UTC (save times one hour off here); a
-      scripted run with a mouse move during the mission seemed to stop presenting (no
-      screenshots after ~55 s; not investigated, maybe the reverted mouse change below)
-- [ ] Mouse for real play (Task 10): tried and reverted (unverified): raw mouse motion
-      (winit DeviceEvent::MouseMotion) as DirectInput's relative axes, the cursor hidden and
-      confined while focused, so turning never stops at the display's edge; and
-      `click*ms@x,y` (held clicks) in GUNMETAL_INPUT
-- [ ] Frame rate (milestone 2; findings, unchanged): game_frame (0x45e360) ends with
-      Sleep(frame start + maxFrameTime - timeGetTime()) unless Game/variableUpdate
-      (proj_data+0x4c4) or proj_data+0x374 is set. maxFrameTime (+0x4c0) is 30 ms (~33 fps).
-      Logic is fixed-step and frame-bound: game_clock_tick (0x534e70) adds game_step_ms
-      (0x534eb0: maxFrameTime, or variableUpdateTime +0x4c8 with variableUpdate) to the game
-      time (+0x4dc) per tick; no real clock goes in, so a slow frame slows the game. With
-      variableUpdate=1 the game runs (real elapsed / variableUpdateTime) ticks per frame, at
-      most 3, of variableUpdateTime (33 ms or 1000/refresh rate) each; variableUpdate is also
-      forced on when proj_data+0x36c/+0x370 are set (0x4594b4). Settings read in game_start
-      (Game section: maxFrameTime, variableUpdate, variableUpdateTime). Uncapping: keep the
-      30 ms logic step and interpolate drawing, or run variableUpdate with a fixed step
-- [ ] Device loss (Task 7, postponed for gameplay): Alt+Tab, Win+D, lock screen (Win+L).
-      The game's path: frame_begin (0x46f590) asks TestCooperativeLevel every frame; at the
-      first answer that is not D3D_OK d3d_lost_release (0x46f190) releases the event query and
-      the dynamic vertex/index buffers (seen: all reach 0, our Release frees them); on
-      D3DERR_DEVICELOST it unacquires mouse and keyboard and sets the lost flag (0x76d51d), and
-      its message pump (0x57ac90) then waits in GetMessageA; on D3DERR_DEVICENOTRESET it calls
-      Reset, then d3d_restore (0x46f1f0). 0x470040, 0x46df40 and 0x47b1a0 (mode changes) have
-      their own waits. Tried: a scripted `minimize` (winit `set_minimized`) really loses the
-      device; `restore` (`set_minimized(false)` + `focus_window`: the window is in front again
-      at 1024x768) leaves TestCooperativeLevel at D3DERR_DEVICELOST for 8 s and more, so the
-      game never resets. Also needed: on regaining focus, post WM_ACTIVATEAPP/WM_ACTIVATE/
-      WM_SETFOCUS/WM_PAINT to wake the waiting pump (user32 sends nothing on Focus(true)
-      today; tried, wakes it). Next: find why D3D9 does not take the display back (exclusive
-      mode returns through the focus window's WM_ACTIVATEAPP; try ShowWindow SW_RESTORE +
-      SetForegroundWindow directly, or an outside helper). Manual checks for the user
-      afterwards: Alt+Tab, Win+D, Win+L and back
+      after a restart. No sound (DirectSound fails; the game goes on)
+
+- [x] Window mode and borderless fullscreen instead of exclusive fullscreen: the host's
+      device is always windowed, the picture keeps its aspect ratio (black bars); Alt+Enter
+      switches, saved in `registry.txt`, fullscreen by default (test `tests/picture.rs`).
+      Seen: front end in both
+
+## Open
+
+- [ ] Frame rate (milestone 2). Findings 2026-10-30 (`src/platform/fps.rs`): missions are
+      already uncapped. The game's own settings switch Game/variableUpdate on (maxFrameTime
+      40, variableUpdate 1, variableUpdateTime 40; not 30 as read earlier from the code's
+      defaults), so game_frame (0x45e360) runs (real clock proj_data+0x360 - game time) / 40
+      logic ticks of 40 ms (0..3; behind by more, the clock is pulled to game time + 120,
+      0x4113f0) and draws every frame without a Sleep (~150 fps here). Game time follows the
+      real clock, so the speed is right at any frame rate. But the logic moves in 40 ms steps
+      (25 Hz) and the game does not interpolate: between two ticks every picture is the same
+      (seen: the view matrix changes only at a tick). Per drawn frame only 0x44d9f0 gets the
+      40 ms step (`GUNMETAL_STEPS=1`; envelopes of a list at 0x661d6c whose results are not
+      stored, probably Xbox rumble: harmless).
+- [x] Smooth pictures, first part (`fps.rs`, test `tests/fps.rs`): the camera (cam_set
+      0x5491e0) and the model nodes (set_world 0x490610, ~470 a frame) are drawn between
+      their places at the last two ticks (positions lerped, rotations slerped; one tick
+      late), changed only for the drawing call and put back; the camera's globals are set
+      again with the real values at the frame's end. Seen: the camera moves every frame
+      (before: every 40 ms), the mission looks right, game time still follows the real
+      clock; costs ~0.07 ms a frame. Registry `Smooth` = 0 turns it off
+- [x] Smooth pictures, effects: particles (the game keeps each emitter's place at the last
+      two ticks and blends them by a `t` it always passes as 0, 0x5123a0 -> 0x543b90; we pass
+      how far between the ticks) and trails (0x53a2c0, point histories moved on at each tick:
+      each point mixed between its last two ticks). Seen: trail points move every frame,
+      particles look right. Measured (per caller of the sprite call 0x43d6d0): target markers
+      are projected every frame with the drawn camera (onto the target's last tick place: off
+      by what it moves in 40 ms, small)
+- [ ] Smooth pictures, left at the tick (small): water (0x530da0, its waves if they move),
+      the radar's dots (0x444035, 0x4440e6), a trail's texture scroll (+0x98); look at it
+      in play (does anything still shake?)
+- [ ] Frame rate, later: a frame-rate limit setting; performance for 480 fps (now ~6-8 ms a
+      frame in a mission); the game's demo recorder (Demo/recordDemo, playDemo) to compare
+      the same play at two rates
+- [x] Resolution and widescreen, first part (`video.rs`): the Video menu offers every mode of
+      the display (the game cut the list at 1600x1200 twice: the enumeration filter set at
+      0x459743, and the count 0x46dbc0); the menu switches at once and keeps the choice in
+      persist.dat. Aspect: a camera's projection takes the back buffer's own width / height
+      for the game's 4:3 (entry 0 of aspect_value 0x5499a0, "Normal"), so the 3D view fills
+      any display undistorted and sees more at the sides (Hor+); elsewhere 4:3 stays (the
+      viewport and cinema bars take it as the monitor's shape). Seen at 2560x1440
+- [x] HUD at any resolution (`hud.rs`): the HUD's functions (0x43c210 each frame, the set-up
+      0x43c890/0x43cf60, the sprite sheets' viewport 0x43cf30, the players' parts of the
+      screen at 0x656980) see a screen 768 pixels high (1365x768 for 2560x1440), the overlay
+      pages they draw are scaled up (0x48d8f0). Seen at 2560x1440: the panels, the crosshair
+      and the target markers as at 1024x768; 1024x768 unchanged
+- [ ] Resolution, still open: the menus and the door transition are stretched to a wider
+      back buffer (as the game always did: pillarbox them, 4:3 in the middle?); the radar is
+      wider than round (it follows the screen's width); our own resolution setting (the
+      game's needs its menu, which takes keys only in parts)
 - [ ] DirectInput: buffered keyboard data (GetDeviceData; the game uses it for short presses),
       joysticks (gamepads), the exclusive mouse's relative movement at the window's edge
 - [ ] Videos (`.wmv`) and music: the graph skips them now (`dshow.rs`)

@@ -165,7 +165,7 @@
 0x655694 video_player         the current video player
 0x726b08 kb_device            the keyboard's IDirectInputDevice7A (its IDirectInput7A at 0x726b0c)
 0x726b28 mouse_device         the mouse's IDirectInputDevice7A (its IDirectInput7A at 0x726b2c, state at 0x726b14)
-0x72a458 proj_data            the project's data (getProjData(): error strings at +0x8d8, settings at +0x35c; Game settings maxFrameTime +0x4c0, variableUpdate +0x4c4, variableUpdateTime +0x4c8, frame step +0x4cc, game time +0x4dc)
+0x72a458 proj_data            the project's data (getProjData(): error strings at +0x8d8, settings at +0x35c; Graphics/MonitorType +0x334 (string) -> +0x354 (0 4:3, 1 16:9), Graphics/AspectRatio +0x344 -> +0x358 (0 4:3, 1 1.66, 2 16:9, 3 1.85, 4 2.00, 5 2.35, 6 AUTO); real clock +0x360 (ms, 0x534270 advances it by timeGetTime), Demo settings recordDemo +0x36c, playDemo +0x370, dumpDemoAnim +0x374, Game settings maxFrameTime +0x4c0, variableUpdate +0x4c4, variableUpdateTime +0x4c8 (the game's data: 40, 1, 40), frame step +0x4cc, game time +0x4dc)
 
 # Game loop and time (Task 11; PLAN.md "Frame rate")
 0x45e360 game_frame           one frame: logic ticks (game_clock_tick and the world update; with variableUpdate up to 3 per frame), drawing, then, unless variableUpdate or proj_data+0x374, Sleep(frame start + maxFrameTime - timeGetTime()) at 0x45fe7c
@@ -174,6 +174,30 @@
 0x534eb0 game_step_ms         variableUpdateTime (proj_data+0x4c8) with variableUpdate (+0x4c4), else maxFrameTime (+0x4c0, 30)
 0x534ed0 game_time_ms         proj_data+0x4dc
 0x534ee0 frame_step_ms        proj_data+0x4cc: the game time this frame advances (maxFrameTime, or variableUpdateTime times the ticks)
+0x534270 real_clock_update    proj_data+0x360 += timeGetTime() - last (unless paused, +8)
+0x4113f0 clock_set            thiscall: [ecx] = arg (game_frame: real clock = game time + 3 steps when more than 3 ticks behind)
+0x5349a0 clock_game_time      thiscall on proj_data: +0x4dc
+0x44d9f0 envelopes_update     cdecl(step ms), per drawn frame: two attack/sustain/release envelopes (0x44d6c0) per entry of the list at 0x661d6c, maxima per player into locals only (probably Xbox rumble)
+0x43be30 frame_time_set       cdecl(game time): 0x661d08 = it, 0x661d0c = it - previous
+0x5491e0 cam_set              cdecl(position, 3x3 rotation): globals 0x72a7c8 (position), 0x72a7d8 (matrix), then render_set_camera; called by 0x40c2b0 with the camera's +0x1cc and +0x1a8
+0x549180 cam_set_matrix       cdecl(4x4 matrix): the same from a matrix
+0x5506c0 node_draw            thiscall on a model node: computes its world place at +0x40 (0x5501a0), set_world, then the mesh (vtable +0xc of [+0x90])
+0x490610 set_world            (place: 3x3 rotation, position +0x24, scale +0x30): SetTransform WORLD from it (matrix at 0x6bc2b4)
+0x470d00 render_set_world     thiscall on the renderer (4x4 matrix): kept at +0x46574 (the draw queue copies it), SetTransform WORLD
+0x4727f0 render_mesh          thiscall on the renderer: queues a mesh (records of 100 bytes at +0x4c4c4, count +0x7e4c4) with the renderer's world
+0x474e60 render_flush         thiscall on the renderer: draws the queue
+0x4707e0 render_set_camera    thiscall on the renderer 0x675d40 (matrix): the view matrix (SetTransform VIEW at 0x47091a), kept at +0x465b4, position at +0x4ba2c
+0x623528 skip_frames          Demo/skipFrames: game_frame draws only every n-th frame (counter 0x62352c)
+0x5123a0 effects_draw         thiscall(?, t): this+0x20 = t, effect manager [this+4] (global 0x72a780) +0x10 = t, draws every effect (0x536320 -> 0x536630: vtable +0x38 (pass, t)); called with t = 0 from 0x503af8
+0x543b90 particles_draw       thiscall(pass, t): rebuilds the particles of a system from its emitters, place = [+0xc] (last tick) * t + [+0x10] (tick before) * (1 - t); particles 64 bytes at [+0x34] (alive +0, position +4), count +0x2c; drawn by 0x543530
+0x543530 particles_render     thiscall: the particles as camera-facing quads (camera matrix 0x72a7d8) in the dynamic vertex buffer, identity WORLD
+0x53a2c0 trail_draw           thiscall(pass, t unused): a trail: rows [+0xac][j] of [+8] points (12 bytes), j up to [[+0x94]+0x2c]; texture scroll +0x98
+0x53a190 trail_update         a tick of a trail: rows moved on by one, row 0 from the source [+4]; scroll +0x98 += [[+0x94]+0x44]
+0x530da0 water_draw           thiscall on "Water": its meshes [+0xcc] (count +0xd0) in [+0x1c0] layers [+0x1c4] apart, identity WORLD
+0x43d6d0 sprite_draw          thiscall(sprite, x, y, ?, w, h): an overlay sprite (0x48e5a0 on 0x71e690); markers from 0x43ee73, 0x440145, 0x447360 (projected every frame), radar dots 0x444035, 0x4440e6 (at ticks)
+0x48e5a0 overlay_sprite       thiscall(sprite, x, y, ..): a quad of the overlay (MatCore.cpp)
+0x44b270 lightmaps_draw       LightMaps.cpp: dynamic light maps
+0x46cf90 text_draw            thiscall(string, x, y): characters of a 16x16 font grid
 0x4d5a60 sub_4d5a60           found by discovery since Task 11 (a jump table after a call to _exit): a vtable method (0x5e81bc); switch on a 1..4 state at [arg+4]
 
 # MFC
@@ -191,3 +215,19 @@
 0x598704 RtlUnwind
 0x5c3e58 DirectSoundCreate8
 0x5ca3f0 timeSetEvent
+0x469740 d3d_enum_modes       thiscall on 0x6757e8 (filter: min w, min h, max w, max h, ..., flags +0x18): enumerates the adapters' modes the filter lets through (check 0x46b850); game_start sets 640x480..1600x1200 at 0x459743 unless options+0x9c
+0x46dbc0 d3d_mode_count       thiscall(adapter, format, only up to 1600x1200): modes in the list; 0x46dc70 the n-th (width, height)
+0x5499a0 aspect_value         cdecl(index) -> st0: 4:3, 1.66, 16:9, 1.85, 2.00, 2.35 (6 = AUTO: a warning, 1.0)
+0x549600 aspect_auto          cdecl(monitor type, screen w, screen h) -> st0: render h * (16 or 4) / (render w * (9 or 3)) * w / h
+0x40c2b0 camera_apply         thiscall(camera): cam_set, then the projection's aspect: AspectRatio 6 -> aspect_auto, else aspect_value; 0x549cb0 with the FOV
+0x46eec0 render_width         thiscall on the renderer 0x675d40: [+0x24] when +0x1a, else +0x4ba4c (0x46eee0 the height, +0x4ba50)
+0x43c210 hud_frame            thiscall on the HUD (0x6556c8?): per frame the HUD's layout from the screen's size, the sprite sheets (0x656d30) and the players' parts (0x656980), then hud_draw at 0x43c78b
+0x43d190 hud_draw             thiscall(?, ?, ?, width factor): the HUD's elements (+0x24, +0x1490, +0x18d0, +0x191c, +0x1964, +0x198c, +0x2a18, +0xf10: vtable +8 update, +4 draw), cinema bars, then the 3D view set back (0x549910)
+0x43c890 hud_setup            the screen's size into 0x656d18/0x656d1c and the HUD panels (0x446670, 0x446740, 0x445d10)
+0x43bf20 hud_set_part         cdecl(viewport, player): the player's part of the screen copied to 0x656980 + 52 * player (x, y, w, h at +0x10), sheet_place on 0x656d30 + ...
+0x43cf30 sheet_place          thiscall on a sprite sheet (viewport): origin (+0, +4) and size (+0x10, +0x14) from the viewport's +0x10..+0x1c; 0x43d880 x = origin + size * fraction, 0x43d8b0 the same for y
+0x48d7f0 overlay_begin        thiscall on the overlay 0x71e690 (page): locks the dynamic vertex buffer of the page (+0x4964 vertices, +0x495c count, +0x4968 indices, +0x4960 index count)
+0x48d8f0 overlay_flush        thiscall on the overlay: unlocks and draws the page's quads (vertices 28 bytes: x, y, z, rhw, colour, u, v)
+0x5492a0 world_to_screen      a point through the camera to screen pixels (render_width / 2 ...)
+0x549470 world_to_screen2     the same with the screen size at 0x6f99b0/0x6f99b4
+0x6f99b0 screen_size          the screen's width and height (0x6f99b4)
