@@ -5,7 +5,10 @@
 //!
 //! Scripted runs (`GUNMETAL_INPUT`) get only their script's keys and mouse: the real keyboard
 //! and mouse are ignored (`reaches_game`), so someone using the machine cannot steer a test
-//! run into a new game. The window's close button and focus changes still count.
+//! run into a new game. Only the window's close button counts; focus changes and minimising
+//! come from the script too (`blur`, `focus`, `minimize`, `restore`), since the game pauses
+//! when it loses the focus (`user32`'s activation messages) and someone clicking elsewhere
+//! would stop a test run.
 //!
 //! The cursor: the game takes the mouse through DirectInput, exclusive while its window is in
 //! front, and draws its own cursor from the mouse's movement; it never calls ShowCursor.
@@ -45,15 +48,20 @@ pub enum Input {
     /// mouse wheel: lines, positive away from the user
     Wheel(i32),
     Close,
+    /// the window got (true) or lost the focus
     Focus(bool),
+    /// the window was minimised (true) or restored
+    Minimized(bool),
     /// scripted only: a dword written to guest memory (address, value)
     Poke(u32, u32),
+    /// scripted only: the Direct3D device is lost for this many ms (`d3d9::device::simulate_loss`)
+    LoseDevice(u32),
 }
 
 /// Whether input from the real keyboard, mouse and window reaches the game: in a scripted run
-/// (`GUNMETAL_INPUT`) only the window's close button and focus changes do.
+/// (`GUNMETAL_INPUT`) only the window's close button does.
 pub fn reaches_game(i: &Input, scripted: bool) -> bool {
-    !scripted || matches!(i, Input::Close | Input::Focus(_))
+    !scripted || matches!(i, Input::Close)
 }
 
 /// This run is scripted (`GUNMETAL_INPUT` is set).
@@ -73,6 +81,8 @@ struct App {
     cursor_hidden: bool,
     /// the window has the focus
     focused: bool,
+    /// the window is minimised
+    minimized: bool,
     /// the cursor is hidden and confined for an exclusive DirectInput mouse (`catch_cursor`)
     caught: bool,
     window: Option<Window>,
@@ -121,6 +131,7 @@ fn with_host<R>(f: impl FnOnce(&mut Host) -> R) -> R {
                     fitted: (0, 0),
                     cursor_hidden: false,
                     focused: false,
+                    minimized: false,
                     caught: false,
                     window: None,
                     game_size: (640, 480),
@@ -292,7 +303,7 @@ pub fn pump(wait: Duration) {
     with_host(|h| {
         let _ = h.event_loop.pump_app_events(Some(wait), &mut h.app);
         h.app.catch_cursor();
-        scripted(&mut h.app.input);
+        scripted(&mut h.app);
     });
 }
 
@@ -300,10 +311,12 @@ pub fn pump(wait: Duration) {
 /// after start) for tests. `click@x,y` / `rclick@x,y` (client pixels of the game's size, after
 /// a move there), `move@x,y`, a key held 100 ms or `*ms` (Enter, Escape, Space, Tab, Up, Down,
 /// Left, Right, Ctrl, Alt, Shift, A-Z, 0-9, Numpad0-9, F1-F12), `close` (the window's close
-/// button), `blur` / `focus` (the window loses or gets the focus), `poke@511fc0=1` (a dword
-/// written to guest memory, hex address and value), `text@Name` (typed characters, `_` a
-/// space).
-fn scripted(input: &mut VecDeque<Input>) {
+/// button), `blur` / `focus` (the game's window loses or gets the focus), `minimize` /
+/// `restore` (the real window minimised, which also takes the focus, or restored and brought
+/// to the front), `lose*2000` (the Direct3D device lost for 2000 ms, then waiting for the
+/// game's Reset), `poke@511fc0=1` (a dword written to guest memory, hex address and value),
+/// `text@Name` (typed characters, `_` a space).
+fn scripted(app: &mut App) {
     static SCRIPT: Mutex<Option<VecDeque<(u64, Input)>>> = Mutex::new(None);
     let mut s = SCRIPT.lock().unwrap();
     let script = s.get_or_insert_with(|| std::env::var("GUNMETAL_INPUT").map(|v| parse_script(&v)).unwrap_or_default());
@@ -311,7 +324,20 @@ fn scripted(input: &mut VecDeque<Input>) {
     while script.front().is_some_and(|e| e.0 <= now) {
         match script.pop_front().unwrap().1 {
             Input::Poke(a, v) => super::mem().wr32(a, v),
-            i => input.push_back(i),
+            Input::LoseDevice(ms) => super::d3d9::device::simulate_loss(Duration::from_millis(ms as u64)),
+            Input::Minimized(m) => {
+                if let Some(w) = &app.window {
+                    w.set_minimized(m);
+                    if !m {
+                        w.focus_window();
+                    }
+                }
+                // what the real window's events would have told the game (they do not reach
+                // it in a scripted run)
+                app.input.push_back(Input::Minimized(m));
+                app.input.push_back(Input::Focus(!m));
+            }
+            i => app.input.push_back(i),
         }
     }
 }
@@ -349,6 +375,10 @@ fn parse_script(text: &str) -> VecDeque<(u64, Input)> {
             ev.push((t, Input::Close));
         } else if what == "blur" || what == "focus" {
             ev.push((t, Input::Focus(what == "focus")));
+        } else if what == "minimize" || what == "restore" {
+            ev.push((t, Input::Minimized(what == "minimize")));
+        } else if let Some(ms) = what.strip_prefix("lose*").and_then(|m| m.parse().ok()) {
+            ev.push((t, Input::LoseDevice(ms)));
         } else {
             let (name, hold) = what.split_once('*').map_or((what, 100), |(n, h)| (n, h.parse().unwrap_or(100)));
             let Some((vk, scan)) = key_by_name(name).and_then(vk_of) else {
@@ -484,6 +514,9 @@ impl App {
     fn keep_fullscreen(&mut self) {
         let Some(w) = &self.window else { return };
         let Some(m) = w.current_monitor() else { return };
+        if self.minimized {
+            return;
+        }
         let (pos, size) = (w.outer_position().ok(), w.inner_size());
         if w.fullscreen().is_some() && (size != m.size() || pos != Some(m.position())) && self.refits < 8 {
             self.refits += 1;
@@ -547,7 +580,15 @@ impl ApplicationHandler for App {
                 self.catch_cursor();
                 self.real(Input::Focus(f));
             }
-            WindowEvent::Resized(_) => self.keep_fullscreen(),
+            WindowEvent::Resized(_) => {
+                // minimised: Windows reports a size of 0 x 0; restored: the size again
+                let min = self.window.as_ref().and_then(|w| w.is_minimized()).unwrap_or(false);
+                if min != self.minimized {
+                    self.minimized = min;
+                    self.real(Input::Minimized(min));
+                }
+                self.keep_fullscreen();
+            }
             // moved to another display while fullscreen: fill that one
             WindowEvent::Moved(_) => self.keep_fullscreen(),
             WindowEvent::CursorMoved { position, .. } => {

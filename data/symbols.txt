@@ -94,7 +94,12 @@
 0x46f190 d3d_lost_release     the game's device-lost handler: releases default-pool resources (event query 0x47b410, dynamic buffers 0x4747b0) and ten callbacks at +0x84ed0
 0x46f1f0 d3d_restore          after Reset: event query, dynamic buffers, render states, ten callbacks at +0x84ef8
 0x57ac90 msg_pump             PeekMessageA loop; GetMessageA (waits) while minimised (0x76d50a) or the device is lost (0x76d51d)
-0x57ae70 wnd_proc             the game's window procedure
+0x57ae70 wnd_proc             the game's window procedure: WM_ACTIVATEAPP (active flag 0x76d508, callbacks kind 0/1), WM_SIZE (SIZE_MINIMIZED sets 0x76d50a, RESTORED clears it; kind 3 callbacks), WM_SHOWWINDOW, WM_PAINT (black), WM_ERASEBKGND while lost, WM_SETCURSOR, WM_CHAR, Alt+Enter, WM_SYSCOMMAND (no screen saver); WM_ACTIVATE and WM_SETFOCUS go to DefWindowProcA
+0x57b580 wnd_add_callback     thiscall on 0x76d500 (out id, kind, function): up to ten callbacks per kind at +0x420 (0 activate, 1 deactivate, 3 moved or resized)
+0x57b600 wnd_remove_callback  thiscall on 0x76d500 (kind, slot)
+0x461df0 app_deactivate       wnd callback kind 1: pauses the video, the video player (0x655694 +0x14) and, in a mission (state 0x664728 = 0xe), the game clock (0x534240)
+0x461e70 app_activate         wnd callback kind 0: resumes what app_deactivate paused
+0x460240 app_resized          wnd callback kind 3: presents the last frame again (0x48f150 -> frame_present)
 0x46f900 frame_end_scene?     EndScene (and a SetStreamSource)
 0x46fb90 frame_present?       Present
 0x557ce0 game_log             writes the first 5 messages (count at 0x76c288) to gunmetal.log in the game folder, with the adapter and version at the first
@@ -187,6 +192,7 @@
 0x675390 d3d9                 the IDirect3D9
 0x675394 d3d_device           the IDirect3DDevice9
 0x6757e8 d3d_setup            the Direct3D set-up object (DXSetup.cpp): settings flags at +0x18, adapter list at +0x30, count at +0x2c
+0x76d500 wnd_state            the window object: +8 active (0x76d508), +0xa minimised (0x76d50a), +0x1d device lost (0x76d51d), +0x420 callbacks
 0x76c474 cpu_mhz              the clock rate cpu_measure_mhz found; above 1100 a first start takes the fast-CPU default of setting +0x1234 (0x459904)
 0x655690 video_active         a video is playing
 0x655694 video_player         the current video player

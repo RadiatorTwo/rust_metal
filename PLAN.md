@@ -43,8 +43,8 @@ Updated 2026-10-30. Details on how things work: CLAUDE.md. Design:
       settings choose, and VMR9, in an experiment with video_use_vmr9 forced true) were seen
       passing (tests `tests/dshow.rs`)
 
-- [x] Scripted runs (`GUNMETAL_INPUT`) ignore the real keyboard and mouse; the close button
-      and focus changes still count (test `tests/input.rs`)
+- [x] Scripted runs (`GUNMETAL_INPUT`) ignore the real keyboard, mouse and focus; the close
+      button still counts (test `tests/input.rs`)
 
 - [x] Front end drawn (Task 6): cube textures, render targets and other device surfaces,
       vertex declarations, shaders (bytecode as it is), state blocks, every device method the
@@ -76,6 +76,17 @@ Updated 2026-10-30. Details on how things work: CLAUDE.md. Design:
       succeeds (two devices, primary 44100 Hz 16-bit stereo, the front end's samples loaded
       and played). Listening is the user's. GetLocalTime is local time now (save slot times
       were UTC; `tests/kernel32_time.rs`)
+
+- [x] Device loss and Reset (Task 7): the host device is windowed, so minimising and Alt+Tab
+      do not lose it (seen). Focus and minimising now reach the game as WM_ACTIVATEAPP,
+      WM_ACTIVATE, WM_SETFOCUS/KILLFOCUS and WM_SIZE (its pause on deactivation: video,
+      music player, a mission's clock; asleep in GetMessageA while minimised). A loss (lock
+      screen, UAC, mode change) makes the game release its default-pool resources and wait for
+      a message; once the host's TestCooperativeLevel stops saying lost, its window gets a
+      WM_PAINT and its next frame calls Reset. Seen with a simulated loss (`GUNMETAL_INPUT`
+      `lose*2000`): Reset -> D3D_OK, the front end draws again; minimise/restore and blur/focus
+      scripted (tests `tests/activation.rs`). To be confirmed by hand: Alt+Tab, Win+D, Win+L
+      and back, in the front end and in a mission
 
 ## Open
 

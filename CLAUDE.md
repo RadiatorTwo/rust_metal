@@ -84,7 +84,9 @@ device's back buffer size fits (`set_game_size`, centred), or borderless fullscr
 Alt+Enter switches, `display.rs` keeps the choice, fullscreen by default; ShowCursor hides
 the cursor over it; an acquired exclusive DirectInput mouse hides and confines it while the
 window has the focus, `catch_mouse`, not in scripted runs; raw mouse motion is
-`Input::Motion`), `gdi32.rs` (a stock brush), `advapi32.rs` (registry in
+`Input::Motion`; focus changes and minimising reach the game's window as WM_ACTIVATEAPP,
+WM_ACTIVATE, WM_SETFOCUS/WM_KILLFOCUS and WM_SIZE, `user32::activation`: the game pauses
+while inactive and sleeps while minimised), `gdi32.rs` (a stock brush), `advapi32.rs` (registry in
 `registry.txt`), `winmm.rs` (clock, timeSetEvent threads), `ole32.rs` (CoCreateInstance by
 CLSID: built-in DirectInput, filter graph and VMR9, and `ole32::register_class(clsid, create)`
 for later modules; an unknown CLSID gives REGDB_E_CLASSNOTREG and a log line), `dinput.rs`
@@ -157,6 +159,12 @@ would be slow), ProcessVertices makes it stale (`resources::stale`). Textures an
 read at every lock. Every device method the game calls goes through; *UP draws hand D3D9 the
 game's arrays in place after a check that they are committed guest memory. Not implemented:
 swap chains, volume textures, patches, GetNPatchMode, GetDC. `shot.rs`: `GUNMETAL_SHOT`.
+Device loss (`device.rs` module docs): a windowed device is not lost by minimising or Alt+Tab
+(seen), but can be by the lock screen, UAC, Ctrl+Alt+Del or a mode change. The game then
+releases its default-pool resources and waits in GetMessageA; `device::lost_ended` repaints
+its window (WM_PAINT) once the host's device is no longer lost, so its next frame calls Reset
+(logged "d3d9: Reset -> 0x0"). Seen with the simulated loss (`lose*ms`): Reset succeeds and
+the front end draws again.
 
 Paths: the game uses paths relative to its folder ("data\init.ini"); `host_path` makes a
 guest path absolute against the current folder (at start `INSTALL_DIR`, C:\Spiele\Gun Metal,
@@ -210,7 +218,8 @@ How the game starts (`GUNMETAL_TRACE_API=1` shows every import call):
    (`attract_ps_h.wmv`, skipped: white) plays and the title returns. To the main menu:
    `GUNMETAL_INPUT="16000:Enter" GUNMETAL_SHOT=shot/menu.png` (16 s leaves the title time to
    load; while `GUNMETAL_INPUT` is set the real keyboard and mouse are ignored,
-   `window::reaches_game`: only the close button and focus changes count). To the first mission from a cold start (no saves; it creates
+   `window::reaches_game`: only the close button counts; focus and minimising come from the
+   script: `blur`, `focus`, `minimize`, `restore`; `lose*2000` simulates a device loss). To the first mission from a cold start (no saves; it creates
    save slot 0, delete it afterwards): `GUNMETAL_INPUT="16000:Enter 19000:Up 20000:Enter 24000:Enter
    28000:Enter 32000:Enter 36000:Enter 40000:Enter 44000:Enter 48000:Enter 50000:move@512,384"` (title, Up to
    "Neues Spiel", slot, pilot ID OK, "Einsatz wählen", mission, arsenal "Starten", briefing

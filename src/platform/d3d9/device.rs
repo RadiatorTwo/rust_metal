@@ -8,6 +8,19 @@
 //! is logged at its first call.
 //!
 //! `GUNMETAL_SHOT=file.png`: the back buffer is written there before Present (see `shot`).
+//!
+//! Device loss: the host's device is always windowed, so minimising or Alt+Tab do not lose
+//! it (seen); the lock screen, a secure desktop (UAC, Ctrl+Alt+Del), another program's
+//! exclusive fullscreen or a display mode change can. The game asks TestCooperativeLevel
+//! every frame (frame_begin 0x46f590). At D3DERR_DEVICELOST it releases its default-pool
+//! resources (d3d_lost_release 0x46f190: the event query and the dynamic buffers, whose guest
+//! objects go with their last Release), unacquires the keyboard and mouse, sets its lost flag
+//! 0x76d51d and then waits for a message in its pump (msg_pump 0x57ac90); at
+//! D3DERR_DEVICENOTRESET it calls Reset and re-creates them (d3d_restore 0x46f1f0); a failed
+//! Reset is an assert. Windows repaints the windows when the device can come back; here
+//! `lost_ended`, asked while the game waits in GetMessageA, gives it that WM_PAINT. The
+//! answers are logged when they change ("d3d9: TestCooperativeLevel -> ..."), Reset's result
+//! always. `GUNMETAL_INPUT` `lose*ms` simulates a loss (`simulate_loss`).
 
 use super::{add_ref, cp, gp, hr, query_interface, release, resources, vtbl};
 use crate::platform::{Import, arg, com, log, mem, method_not_implemented as NI, window};
@@ -96,10 +109,95 @@ fn show_cursor(c: &mut Cpu) -> u32 {
     unsafe { (v.ShowCursor)(p, BOOL(arg(c, 1) as i32)) }.0 as u32
 }
 
-/// Reset(present parameters): a new mode or windowed/fullscreen, as the game asks.
+/// Reset(present parameters): a new mode or windowed/fullscreen, as the game asks, or the
+/// device back after a loss. A simulated loss (`simulate_loss`) ends here.
 fn reset(c: &mut Cpu) -> u32 {
     let (p, v) = dv(c);
-    hr(super::with_present_params(arg(c, 1), super::device_no_16bit_modes(), "Reset", |params| unsafe { (v.Reset)(p, params) }))
+    let r = hr(super::with_present_params(arg(c, 1), super::device_no_16bit_modes(), "Reset", |params| unsafe { (v.Reset)(p, params) }));
+    log!("d3d9: Reset -> {r:#x}");
+    if r == 0 {
+        *crate::platform::lock(&SIMULATED_LOSS) = None;
+    }
+    r
+}
+
+/// The game's last TestCooperativeLevel said D3DERR_DEVICELOST: it waits for a message
+/// (msg_pump 0x57ac90) before it asks again (`lost_ended`).
+static SEEN_LOST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// While the game waits for a message after a device loss: true once the device is no longer
+/// lost (asked at most every 100 ms). Windows repaints every window when the desktop comes
+/// back (after the lock screen, a secure desktop, a display mode change); `user32` then
+/// gives the game the WM_PAINT that wakes it, and its next frame resets the device. Without
+/// it, a loss that leaves our window's focus alone would keep the game waiting.
+pub fn lost_ended() -> bool {
+    static ASKED: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    if !SEEN_LOST.load(Ordering::Relaxed) || super::device().is_null() {
+        return false;
+    }
+    let now = std::time::Instant::now();
+    {
+        let mut asked = crate::platform::lock(&ASKED);
+        if asked.is_some_and(|t| now.duration_since(t) < std::time::Duration::from_millis(100)) {
+            return false;
+        }
+        *asked = Some(now);
+    }
+    let p = super::device();
+    let host = hr(unsafe { (vtbl::<IDirect3DDevice9_Vtbl>(p).TestCooperativeLevel)(p) });
+    let ended = cooperative_level(host, *crate::platform::lock(&SIMULATED_LOSS), now) != D3DERR_DEVICELOST;
+    if ended {
+        SEEN_LOST.store(false, Ordering::Relaxed);
+        log!("d3d9: the device is back: the game's window is repainted");
+    }
+    ended
+}
+
+pub const D3DERR_DEVICELOST: u32 = 0x8876_0868;
+pub const D3DERR_DEVICENOTRESET: u32 = 0x8876_0869;
+
+/// A simulated device loss (scripts, `simulate_loss`): lost until this time, then waiting for
+/// a Reset.
+static SIMULATED_LOSS: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// Device loss for a test: TestCooperativeLevel answers D3DERR_DEVICELOST for `d`, then
+/// D3DERR_DEVICENOTRESET until the game's Reset succeeds, while the host's device stays
+/// fine. The game takes its whole device-lost path (frame_begin 0x46f590: d3d_lost_release,
+/// the wait in its message pump, Reset, d3d_restore), and the host's Reset checks that every
+/// default-pool resource was released (D3DERR_INVALIDCALL otherwise), as after a real loss.
+pub fn simulate_loss(d: std::time::Duration) {
+    log!("d3d9: device loss simulated for {} ms", d.as_millis());
+    *crate::platform::lock(&SIMULATED_LOSS) = Some(std::time::Instant::now() + d);
+}
+
+/// TestCooperativeLevel's answer: the host's, unless a simulated loss (lost until `until`,
+/// then not reset) says otherwise.
+pub fn cooperative_level(host: u32, until: Option<std::time::Instant>, now: std::time::Instant) -> u32 {
+    match until {
+        Some(t) if now < t => D3DERR_DEVICELOST,
+        Some(_) => D3DERR_DEVICENOTRESET,
+        None => host,
+    }
+}
+
+/// TestCooperativeLevel, called by the game every frame (frame_begin 0x46f590). A change of
+/// its answer is logged: the device lost, ready for a Reset, or fine.
+fn test_cooperative_level(c: &mut Cpu) -> u32 {
+    static LAST: AtomicU32 = AtomicU32::new(0);
+    let (p, v) = dv(c);
+    let host = hr(unsafe { (v.TestCooperativeLevel)(p) });
+    let r = cooperative_level(host, *crate::platform::lock(&SIMULATED_LOSS), std::time::Instant::now());
+    SEEN_LOST.store(r == D3DERR_DEVICELOST, Ordering::Relaxed);
+    if LAST.swap(r, Ordering::Relaxed) != r {
+        let what = match r {
+            0 => "fine",
+            D3DERR_DEVICELOST => "lost",
+            D3DERR_DEVICENOTRESET => "lost, ready for a Reset",
+            _ => "?",
+        };
+        log!("d3d9: TestCooperativeLevel -> {r:#x} (the device is {what})");
+    }
+    r
 }
 
 /// Present(source rect, dest rect, window, dirty region): the back buffer, written to
@@ -169,7 +267,6 @@ fn get_software_vertex_processing(c: &mut Cpu) -> u32 {
     unsafe { (v.GetSoftwareVertexProcessing)(p) }.0 as u32
 }
 
-pass!(test_cooperative_level, TestCooperativeLevel, |c| ());
 pass!(evict_managed_resources, EvictManagedResources, |c| ());
 pass!(get_device_caps, GetDeviceCaps, |c| (gp(arg(c, 1))));
 pass!(get_display_mode, GetDisplayMode, |c| (arg(c, 1), gp(arg(c, 2))));

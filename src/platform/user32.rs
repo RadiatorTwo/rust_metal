@@ -1,6 +1,11 @@
 //! USER32: window classes and windows, the message queue, timers, keyboard and mouse state.
 //! The game's window procedures are guest code; input comes from `window`, which also opens
 //! the real window when the game creates its first top-level one.
+//!
+//! When the real window loses or gets the focus, the game's main window gets what Windows
+//! sends (`activation`: WM_ACTIVATE, WM_ACTIVATEAPP, WM_KILLFOCUS / WM_SETFOCUS); minimised
+//! and restored, WM_SIZE. The game pauses while it is inactive (its WM_ACTIVATEAPP 0: video,
+//! music player, a mission's clock) and sleeps in GetMessageA while minimised.
 
 use super::window::{self, Input};
 use super::{Import, arg, cstr, guest_call, log, mem, put_cstr};
@@ -70,6 +75,8 @@ struct State {
     next: u32,
     main: u32,
     focus: u32,
+    /// the main window is active (has had WM_ACTIVATEAPP 1, `activation`)
+    active: bool,
     queue: VecDeque<Msg>,
     timers: Vec<Timer>,
     /// GetAsyncKeyState: bit 7 down, bit 0 pressed since the last query
@@ -91,6 +98,7 @@ static STATE: Mutex<State> = Mutex::new(State {
     next: 0x10000,
     main: 0,
     focus: 0,
+    active: false,
     queue: VecDeque::new(),
     timers: Vec::new(),
     keys: [0; 256],
@@ -256,21 +264,72 @@ fn handle(s: &mut State, hwnd: u32, i: Input, scripted: bool) {
             s.queue.push_back(m(WM_MOUSEWHEEL, buttons(&s.keys) | ((n * 120) as u32) << 16, (x as u32 & 0xffff) | (y as u32) << 16));
         }
         Input::Close => s.queue.push_back(m(WM_CLOSE, 0, 0)),
-        // The game pauses itself when it is deactivated (WM_ACTIVATEAPP 0), as Windows 98
-        // games did; here it keeps running in the background. Keys held when the window
-        // loses the focus would never see their release: they are let go.
-        Input::Focus(false) => {
-            s.dik = [false; 256];
-            s.motion = (0, 0, 0);
-            for vk in 0..256 {
-                if s.keys[vk] & 0x80 != 0 {
-                    s.keys[vk] &= !0x80;
-                    s.queue.push_back(m(WM_KEYUP, vk as u32, 0xc000_0001));
+        // Keys held when the window loses the focus would never see their release: they are
+        // let go.
+        Input::Focus(f) => {
+            if !f {
+                s.dik = [false; 256];
+                s.motion = (0, 0, 0);
+                for vk in 0..256 {
+                    if s.keys[vk] & 0x80 != 0 {
+                        s.keys[vk] &= !0x80;
+                        s.queue.push_back(m(WM_KEYUP, vk as u32, 0xc000_0001));
+                    }
                 }
             }
+            // from the main window's first showing on (`show` activates it)
+            if s.wins.get(&hwnd).is_some_and(|w| w.shown) && f != s.active {
+                s.active = f;
+                s.queue.extend(activation(f).map(|(msg, wp)| m(msg, wp, 0)));
+            }
         }
-        Input::Focus(true) | Input::Poke(..) => {}
+        Input::Minimized(min) => {
+            if s.wins.get(&hwnd).is_some_and(|w| w.shown) {
+                let lp = s.wins.get(&hwnd).map_or(0, |w| ((w.rect[2] - w.rect[0]) as u32 & 0xffff) | ((w.rect[3] - w.rect[1]) as u32) << 16);
+                s.queue.push_back(if min { m(WM_SIZE, SIZE_MINIMIZED, 0) } else { m(WM_SIZE, SIZE_RESTORED, lp) });
+            }
+        }
+        Input::Poke(..) | Input::LoseDevice(_) => {}
     }
+}
+
+pub const SIZE_RESTORED: u32 = 0;
+pub const SIZE_MINIMIZED: u32 = 1;
+
+/// The messages (and wParam) Windows sends a top-level window when its application becomes
+/// active (`true`) or inactive, in Windows' order: WM_ACTIVATEAPP 1, WM_ACTIVATE (WA_ACTIVE),
+/// WM_SETFOCUS; or WM_ACTIVATE (WA_INACTIVE), WM_ACTIVATEAPP 0, WM_KILLFOCUS. Here they are posted, since input is turned into
+/// messages without a CPU to call the window procedure on; the game's pump takes them.
+///
+/// The game's window procedure (wnd_proc 0x57ae70) handles WM_ACTIVATEAPP only (WM_ACTIVATE
+/// and the focus messages go to DefWindowProcA): it sets its active flag 0x76d508 and calls
+/// the callbacks registered with wnd_add_callback 0x57b580, kind 0 on activation, kind 1 on
+/// deactivation (0x461df0 pauses the video, the music player and, in a mission, the game
+/// clock; 0x461e70 resumes them; the keyboard is unacquired / acquired, 0x4dddf0, 0x4dde00).
+/// WM_ACTIVATEAPP 1 also clears the minimised flag 0x76d50a. Any message wakes its pump
+/// (msg_pump 0x57ac90), which waits in GetMessageA while the device is lost or the window
+/// is minimised.
+pub fn activation(active: bool) -> [(u32, u32); 3] {
+    if active {
+        [(WM_ACTIVATEAPP, 1), (WM_ACTIVATE, 1), (WM_SETFOCUS, 0)]
+    } else {
+        [(WM_ACTIVATE, 0), (WM_ACTIVATEAPP, 0), (WM_KILLFOCUS, 0)]
+    }
+}
+
+/// A shown, active main window of w x h without the real window (for tests).
+pub fn test_main_window(w: i32, h: i32) -> u32 {
+    let mut s = st();
+    s.next += 4;
+    let hwnd = s.next;
+    s.wins.insert(hwnd, Win { proc_: 0, style: 0x1000_0000, exstyle: 0, rect: [0, 0, w, h], title: String::new(), user: 0, id: 0, shown: true, dirty: false });
+    (s.main, s.focus, s.active) = (hwnd, hwnd, true);
+    hwnd
+}
+
+/// The messages waiting in the queue, taken out (for tests).
+pub fn take_queued() -> Vec<Msg> {
+    st().queue.drain(..).collect()
 }
 
 fn key_alt(keys: &[u8; 256]) -> bool {
@@ -373,6 +432,10 @@ fn get_message(c: &mut Cpu) -> u32 {
         if let Some(m) = take_hooked(c, min, max, true) {
             write_msg(p, &m);
             return (m.msg != WM_QUIT) as u32;
+        }
+        // the device back after a loss: Windows repaints the desktop's windows
+        if super::d3d9::device::lost_ended() {
+            invalidate(main_window());
         }
         poll(Duration::from_millis(5));
     }
@@ -501,9 +564,10 @@ fn show(c: &mut Cpu, hwnd: u32) {
     };
     if first && hwnd == main_window() {
         // what Windows sends when the window shows and becomes active
-        send(c, hwnd, WM_ACTIVATEAPP, 1, 0);
-        send(c, hwnd, WM_ACTIVATE, 1, 0);
-        send(c, hwnd, WM_SETFOCUS, 0, 0);
+        st().active = true;
+        for (msg, wp) in activation(true) {
+            send(c, hwnd, msg, wp, 0);
+        }
     }
 }
 
