@@ -205,6 +205,10 @@ fn test_cooperative_level(c: &mut Cpu) -> u32 {
 /// its aspect ratio in our window (`letterbox`).
 fn present(c: &mut Cpu) -> u32 {
     let (p, v) = dv(c);
+    let frames = crate::platform::frames::on();
+    if frames {
+        crate::platform::frames::before_present();
+    }
     super::shot::before_present(p);
     let w = arg(c, 3);
     let win = if w == 0 { HWND::default() } else { super::host_hwnd(w) };
@@ -212,6 +216,9 @@ fn present(c: &mut Cpu) -> u32 {
     let dest = if arg(c, 2) == 0 { super::letterbox(target) } else { None };
     let dest_ptr = dest.as_ref().map_or(cp(arg(c, 2)), |r| r as *const _);
     let r = unsafe { (v.Present)(p, cp(arg(c, 1)), dest_ptr, win, cp(arg(c, 4))) };
+    if frames {
+        crate::platform::frames::after_present();
+    }
     if r.is_ok() {
         clear_back_buffer(p, v);
     }

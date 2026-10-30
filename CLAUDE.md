@@ -120,7 +120,8 @@ menu offers every display mode, not only up to 1600x1200; the monitor and the ga
 the back buffer's own shape: Hor+ widescreen in missions, the 4:3 menus in the middle), `crash.rs`
 (the C runtime's fatal errors: `__amsg_exit` 0x588d97 hooked; R6025 and the others log the thread,
 `ecx` and its vtable, the ebp chain and a stack scan for return addresses, and every guest thread's
-last import with its stack, then exit as the original), `hud.rs`
+last import with its stack, then exit as the original), `frames.rs` (`GUNMETAL_FRAMES=<file>`: a
+line per picture, 2 s summaries, findings for the tick on a second thread at the exit), `hud.rs`
 (the HUD laid out for a screen 768 pixels high and scaled up: as big as at 1024x768), `fps.rs` (the
 frame rate: missions are uncapped with 40 ms logic ticks; the camera, model nodes, particles and
 trails are drawn interpolated between the last two ticks, registry `Smooth` = 0 turns it off;
@@ -254,7 +255,10 @@ Env: `GUNMETAL_TRACE_API` (imports with arguments), `GUNMETAL_TRACE_REG`, `GUNME
 `GUNMETAL_INPUT` (scripted input, see `window.rs`; real keyboard and mouse ignored),
 `GUNMETAL_WINDOW=WxH`, `GUNMETAL_MONITOR=n`, `GUNMETAL_WATCH` (where the game is, every 2 s),
 `GUNMETAL_PROF`, `GUNMETAL_SAMPLE`, `GUNMETAL_STEPS`, `GUNMETAL_NO_MF` (music off),
-`GUNMETAL_COUNT=<file>`, `GUNMETAL_SHOT=shot/x.png` (the back buffer before Present, at most every
+`GUNMETAL_COUNT=<file>`, `GUNMETAL_FRAMES=<file>` (per picture: Present time, interval, time to
+produce it, ticks and their time; summaries every 2 s and at ExitProcess; at the exit the imports
+called inside ticks, time per tick part, and guest pages written by the ticks and the drawing, from
+write-watch probes every 20th picture, which the summaries leave out), `GUNMETAL_SHOT=shot/x.png` (the back buffer before Present, at most every
 `GUNMETAL_SHOT_MS`, 500; `{t}` in the name: ms since start; `shot/` is git-ignored: game imagery is
 never committed).
 

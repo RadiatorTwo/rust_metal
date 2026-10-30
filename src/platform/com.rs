@@ -100,6 +100,11 @@ pub fn release(this: u32, host_count: u32) {
     free(this);
 }
 
+/// Every shadow's guest range [start, end) (for the frame log's page findings).
+pub fn shadow_ranges() -> Vec<(u32, u32)> {
+    with(|t| t.entries.iter().flatten().flat_map(|e| e.shadows.values().map(|s| (s.guest, s.guest + s.size))).collect())
+}
+
 /// The guest buffer for (object, key) of at least `size` bytes: the same one while it is big
 /// enough, a new one (the old freed, contents not kept) when a bigger size is asked.
 pub fn shadow(this: u32, key: u32, size: u32) -> u32 {

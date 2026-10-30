@@ -77,6 +77,18 @@ pub fn register(kind: Kind, start: u32, tib: u32) {
     s.import.store(0, Ordering::Relaxed);
 }
 
+/// The stacks [lo, hi) of the guest threads other than the main thread.
+pub fn thread_stacks() -> Vec<(u32, u32)> {
+    let m = mem();
+    THREADS
+        .iter()
+        .filter(|s| matches!(s.kind.load(Ordering::Relaxed), 2 | 3))
+        .map(|s| s.tib.load(Ordering::Relaxed))
+        .filter(|&t| t != 0)
+        .map(|t| (m.rd32(t + 8), m.rd32(t + 4)))
+        .collect()
+}
+
 /// The calling thread calls import `k` (its return address on the guest stack).
 pub fn note_import(c: &Cpu, k: usize) {
     let s = slot();

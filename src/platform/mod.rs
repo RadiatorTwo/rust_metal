@@ -18,6 +18,7 @@ pub mod dshow;
 #[cfg(windows)]
 pub mod dsound;
 pub mod fps;
+pub mod frames;
 pub mod gdi32;
 pub mod hud;
 pub mod kernel32;
@@ -488,6 +489,9 @@ fn on_event(c: &mut Cpu, e: Event) {
             };
             LAST_CALL.store(mem().rd32(c.r[ESP]), std::sync::atomic::Ordering::Relaxed);
             crash::note_import(c, k);
+            if frames::on() {
+                frames::import(k, fps::in_tick());
+            }
             let t0 = prof().then(std::time::Instant::now);
             turn_give();
             sample::IN_IMPORT.store(k + 1, Ordering::Relaxed);
@@ -906,6 +910,7 @@ pub fn run_game(game: &crate::game::Game, game_dir: PathBuf) -> u32 {
     c.fs_base = TIB;
     c.r[ESP] = STACK_HI - 64;
     crash::register(crash::Kind::Main, game.exe.entry, TIB);
+    frames::init(game.exe.sections.iter().map(|s| (s.name.clone(), s.va, s.va + s.vsize.max(s.rsize))).collect());
     turn_take();
     c.r[ESP] -= 4;
     m.wr32(c.r[ESP], RET_MAGIC);

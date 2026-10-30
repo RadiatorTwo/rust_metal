@@ -118,28 +118,33 @@ still needs the recompiler wins; (a) stays the later option. Effort: about a wee
 
 ### Step 0: catch the R6025 (independent; first because pacing changes timing)
 
-- [ ] Hook `__amsg_exit` (0x588d97). For code 25 (pure virtual call), log: the thread (main or
+- [x] Hook `__amsg_exit` (0x588d97). For code 25 (pure virtual call), log: the thread (main or
       which guest thread and its start address), the return-address chain (walk ebp, names from
       symbols.txt), `LAST_CALL`, and per thread its last import. Then exit as before.
-- [ ] Test: a unit test for the chain walker on a made-up stack. Run 10 cold starts to the
+- [x] Test: a unit test for the chain walker on a made-up stack. Run 10 cold starts to the
       mission (the CLAUDE.md script; back up and restore the user's saves) and record any hit
       in PLAN.md.
-- [ ] Commit.
+- [x] Commit.
 
 ### Step 1: frame-time log and the baseline
 
-- [ ] `GUNMETAL_FRAMES=<file>` (and a 2 s summary in the log). Per picture: QPC time of the
+- [x] `GUNMETAL_FRAMES=<file>` (and a 2 s summary in the log). Per picture: QPC time of the
       shown Present and its interval to the one before; time to produce the picture; ticks in
       that frame and time spent in tick parts (`IN_TICK` already exists).
-- [ ] Summary per 2 s and at the end: average, 99th percentile, maximum; separately for
+- [x] Summary per 2 s and at the end: average, 99th percentile, maximum; separately for
       intervals with and without a tick; fps.
-- [ ] Finding aids, logged once: imports called inside tick parts by name and count (does the
+- [x] Finding aids, logged once: imports called inside tick parts by name and count (does the
       tick call D3D at all? needed for (a)); time per tick part; pages written per tick and per
       picture (GetWriteWatch on the heap and .data).
-- [ ] Tests: percentile and summary maths on fixed inputs.
-- [ ] Run the profile script 3 times; write the baseline into PLAN.md. Expected: intervals with
+- [x] Tests: percentile and summary maths on fixed inputs.
+- [x] Run the profile script 3 times; write the baseline into PLAN.md. Expected: intervals with
       a tick 2-3x the others, 99th percentile about the tick frame.
-- [ ] Commit.
+- [x] Commit.
+
+**Results (2026-10-31):** R6025 caught in 1 of 10 cold starts, on the main thread (front-end
+world teardown unregistering an item from a router whose handler is already destroyed; see
+PLAN.md). Baseline and findings 1-4 in PLAN.md (frame rate); the tick calls
+IDirect3DDevice9::SetLight and SetTransform and DirectSound, and writes ~825 pages per tick.
 
 ### Step 2: content time from a fine clock
 

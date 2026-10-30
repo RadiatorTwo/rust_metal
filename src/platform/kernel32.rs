@@ -203,6 +203,7 @@ fn exit_process(c: &mut Cpu) -> u32 {
     let code = arg(c, 0);
     super::advapi32::save();
     log!("ExitProcess({code})");
+    super::frames::finish();
     std::process::exit(code as i32)
 }
 
@@ -1620,5 +1621,6 @@ fn exit_process_from_terminate(c: &mut Cpu) -> u32 {
     let code = arg(c, 1);
     super::advapi32::save();
     log!("TerminateProcess({code})");
+    super::frames::finish();
     std::process::exit(code as i32)
 }

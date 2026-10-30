@@ -36,7 +36,7 @@
 //! (game_frame's call of 0x44d9f0, envelopes of a list at 0x661d6c whose results are not
 //! stored: probably the Xbox version's rumble).
 
-use super::{advapi32, guest_call, log, mem};
+use super::{advapi32, frames, guest_call, log, mem};
 use crate::rt::{Cpu, ECX, ESP, call_original};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
@@ -109,9 +109,16 @@ pub fn game_frame(c: &mut Cpu) {
         s.seen.clear();
         s.camera = None;
     }
+    let log = frames::on();
+    if log {
+        frames::frame_start();
+    }
     IN_FRAME.store(true, Ordering::Relaxed);
     call_original(c, GAME_FRAME);
     IN_FRAME.store(false, Ordering::Relaxed);
+    if log {
+        frames::frame_end();
+    }
     let camera = STATE.lock().unwrap().as_mut().and_then(|s| s.camera.take());
     if let Some((pos, rot)) = camera {
         // the camera's globals as the logic left them (registers kept: eax is the result)
@@ -368,14 +375,23 @@ pub fn game_step_ms(c: &mut Cpu) {
     call_original(c, GAME_STEP_MS);
 }
 
-fn tick_part(c: &mut Cpu, addr: u32) {
-    IN_TICK.fetch_add(1, Ordering::Relaxed);
-    call_original(c, addr);
+/// The main thread is inside a tick part.
+pub fn in_tick() -> bool {
+    IN_TICK.load(Ordering::Relaxed) != 0
+}
+
+fn tick_part(c: &mut Cpu, i: usize) {
+    let outer = IN_TICK.fetch_add(1, Ordering::Relaxed) == 0;
+    let t = (outer && frames::on()).then(frames::part_start);
+    call_original(c, TICK_PARTS[i]);
     IN_TICK.fetch_sub(1, Ordering::Relaxed);
+    if let Some(t) = t {
+        frames::part_end(i, t);
+    }
 }
 
 macro_rules! tick_parts {
-    ($($i:literal),*) => { [$((TICK_PARTS[$i], (|c: &mut Cpu| tick_part(c, TICK_PARTS[$i])) as crate::rt::Hook)),*] };
+    ($($i:literal),*) => { [$((TICK_PARTS[$i], (|c: &mut Cpu| tick_part(c, $i)) as crate::rt::Hook)),*] };
 }
 
 pub const HOOKS: [(u32, crate::rt::Hook); 13] = {

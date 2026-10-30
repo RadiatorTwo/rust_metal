@@ -146,6 +146,30 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
       the same (seen: the view matrix changes only at a tick). Per drawn frame only 0x44d9f0 gets
       the 40 ms step (`GUNMETAL_STEPS=1`; envelopes of a list at 0x661d6c whose results are not
       stored, probably Xbox rumble: harmless).
+- [ ] Frame rate: even frame times (docs/superpowers/plans/2026-10-30-tick-decoupling.md,
+      design (a) chosen: the tick on a second thread). Baseline 2026-10-31 (`GUNMETAL_FRAMES`,
+      3 cold runs of the profile script, mission 1, 58-108 s with walking and turning; the
+      write-watch probes, ~4.3 ms every 20th picture, are left out of the intervals but cost
+      ~4 % fps): 136-156 fps; intervals of pictures with a tick avg 11.7-13.7 ms, p99
+      30-40, max 44-60; without a tick avg 5.2-5.7, p99 17-20, max 28-30; all: avg 6.2-7.1,
+      p99 22-27. Time to produce a picture: 10.1-11.5 ms with a tick, 4.3-4.8 without; one
+      tick 5.1-5.7 ms (never 2 ticks in a frame in these runs). Findings for (a):
+      (1) the tick calls Direct3D: IDirect3DDevice9::SetLight ~12.5 and SetTransform ~1 per
+      tick (no Create*, Lock, Draw or Present); DirectSound ~45 calls per tick (3D buffer
+      SetPosition/SetVelocity ~14/~13, and about once per tick DuplicateSoundBuffer, Play,
+      SetVolume, SetFrequency, Min/MaxDistance, sometimes Stop/Release); DirectInput
+      GetDeviceData ~13 and GetDeviceState 3; HeapAlloc ~21, HeapFree ~19; critical sections
+      ~300 and TlsGetValue/Get/SetLastError ~190 (the C runtime); no file I/O on the main
+      thread (other threads: ~0.02 stream reads per tick).
+      (2) 0x413c60 is 96 % of the tick (5.4-5.7 ms avg, max 24-34); game_clock_tick 0.15 ms;
+      the rest under 0.05 ms.
+      (3) pages written per tick ~825 (3.3 MB: heap ~705, COM lock buffers ~103, EXE .data
+      ~13); the drawing after a tick ~1435 (heap ~735, lock buffers ~655, .data ~39), a whole
+      picture with a tick ~1980 (7.9 MB), without a tick ~200-230 (0.8-0.9 MB).
+      (4) pages written by both the tick and the drawing after it: ~282 (1.1 MB: heap ~218,
+      lock buffers ~50, .data ~10), the same heap ranges in every probe. A world copy for (a)
+      would have to sync ~3.3 MB of pages per tick, and the drawing writes ~1.1 MB of pages
+      that the tick writes too (object/node state, not only renderer data)
 - [ ] Smooth pictures, left at the tick (small): water (0x530da0, its waves if they move),
       the radar's dots (0x444035, 0x4440e6), a trail's texture scroll (+0x98); look at it
       in play (does anything still shake?)
