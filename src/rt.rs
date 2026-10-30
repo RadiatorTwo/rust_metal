@@ -48,6 +48,7 @@ pub const ECX: usize = 1;
 pub const EDX: usize = 2;
 pub const EBX: usize = 3;
 pub const ESP: usize = 4;
+pub const EBP: usize = 5;
 pub const ESI: usize = 6;
 pub const EDI: usize = 7;
 

@@ -117,7 +117,10 @@ to a host event whose thread sets the guest one, `host_event`), `d3d9/` (Direct3
 to the system's d3d9.dll, see below), `crt.rs` (`__ftol` hooked; the game's warning report 0x557f40
 goes to our log as "game: ..."), `sample.rs` (`GUNMETAL_SAMPLE=1` profiler; `=54000` starts it after 54 s), `video.rs` (the Video
 menu offers every display mode, not only up to 1600x1200; the monitor and the game's 4:3 picture are
-the back buffer's own shape: Hor+ widescreen in missions, the 4:3 menus in the middle), `hud.rs`
+the back buffer's own shape: Hor+ widescreen in missions, the 4:3 menus in the middle), `crash.rs`
+(the C runtime's fatal errors: `__amsg_exit` 0x588d97 hooked; R6025 and the others log the thread,
+`ecx` and its vtable, the ebp chain and a stack scan for return addresses, and every guest thread's
+last import with its stack, then exit as the original), `hud.rs`
 (the HUD laid out for a screen 768 pixels high and scaled up: as big as at 1024x768), `fps.rs` (the
 frame rate: missions are uncapped with 40 ms logic ticks; the camera, model nodes, particles and
 trails are drawn interpolated between the last two ticks, registry `Smooth` = 0 turns it off;

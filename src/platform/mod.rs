@@ -8,6 +8,7 @@
 
 pub mod advapi32;
 pub mod com;
+pub mod crash;
 pub mod crt;
 #[cfg(windows)]
 pub mod d3d9;
@@ -486,6 +487,7 @@ fn on_event(c: &mut Cpu, e: Event) {
                 }
             };
             LAST_CALL.store(mem().rd32(c.r[ESP]), std::sync::atomic::Ordering::Relaxed);
+            crash::note_import(c, k);
             let t0 = prof().then(std::time::Instant::now);
             turn_give();
             sample::IN_IMPORT.store(k + 1, Ordering::Relaxed);
@@ -788,10 +790,11 @@ fn find_import(dll: &str, name: &str) -> Option<&'static Import> {
 
 /// Game functions replaced by our own (`jit::compile`).
 pub const HOOKS: &[(u32, crate::rt::Hook)] = &{
-    const N: usize = 2 + fps::HOOKS.len() + video::HOOKS.len() + hud::HOOKS.len();
+    const N: usize = 3 + fps::HOOKS.len() + video::HOOKS.len() + hud::HOOKS.len();
     let mut h: [(u32, crate::rt::Hook); N] = [(crt::FTOL, crt::ftol); N];
     h[1] = (crt::GAME_WARNING, crt::game_warning);
-    let mut n = 2;
+    h[2] = (crash::AMSG_EXIT, crash::amsg_exit);
+    let mut n = 3;
     let mut i = 0;
     while i < fps::HOOKS.len() {
         h[n] = fps::HOOKS[i];
@@ -902,6 +905,7 @@ pub fn run_game(game: &crate::game::Game, game_dir: PathBuf) -> u32 {
     let mut c = Cpu::new(m);
     c.fs_base = TIB;
     c.r[ESP] = STACK_HI - 64;
+    crash::register(crash::Kind::Main, game.exe.entry, TIB);
     turn_take();
     c.r[ESP] -= 4;
     m.wr32(c.r[ESP], RET_MAGIC);
