@@ -796,6 +796,7 @@ fn create_thread(c: &mut Cpu) -> u32 {
             }
             let mut tc = super::new_thread_cpu();
             super::crash::register(super::crash::Kind::Thread, start, tc.fs_base);
+            super::frames::thread_start(start);
             let r = guest_call(&mut tc, start, &[param]);
             let code = if tc.stop != 0 { EXIT_CODE.get() } else { r };
             let mut g = objects();

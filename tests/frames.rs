@@ -51,3 +51,12 @@ fn split_by_ticks() {
     // no time: no rate
     assert!(close(summary(&p, 0.0).fps, 0.0));
 }
+
+#[test]
+fn percentile_rank_in_integers() {
+    // nearest rank ceil(0.99 n): 101 values -> the 100th, 1000 -> the 990th, 99 -> the 99th
+    for (n, rank) in [(101, 100.0), (1000, 990.0), (99, 99.0), (150, 149.0)] {
+        let v: Vec<f64> = (1..=n).map(f64::from).collect();
+        assert!(close(stats(&v).p99, rank), "{n} values");
+    }
+}

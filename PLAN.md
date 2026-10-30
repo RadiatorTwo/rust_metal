@@ -147,13 +147,20 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
       the 40 ms step (`GUNMETAL_STEPS=1`; envelopes of a list at 0x661d6c whose results are not
       stored, probably Xbox rumble: harmless).
 - [ ] Frame rate: even frame times (docs/superpowers/plans/2026-10-30-tick-decoupling.md,
-      design (a) chosen: the tick on a second thread). Baseline 2026-10-31 (`GUNMETAL_FRAMES`,
-      3 cold runs of the profile script, mission 1, 58-108 s with walking and turning; the
-      write-watch probes, ~4.3 ms every 20th picture, are left out of the intervals but cost
-      ~4 % fps): 136-156 fps; intervals of pictures with a tick avg 11.7-13.7 ms, p99
-      30-40, max 44-60; without a tick avg 5.2-5.7, p99 17-20, max 28-30; all: avg 6.2-7.1,
-      p99 22-27. Time to produce a picture: 10.1-11.5 ms with a tick, 4.3-4.8 without; one
-      tick 5.1-5.7 ms (never 2 ticks in a frame in these runs). Findings for (a):
+      design (a) chosen: the tick on a second thread). Baseline 2026-10-31, corrected
+      (`GUNMETAL_FRAMES` without page probes, 3 cold runs of the profile script, mission 1,
+      58-108 s with walking and turning; .superpowers/perf/task-spikes-report.md): 145-157 fps;
+      intervals of pictures with a tick avg 11.5-12.0 ms, p99 20-21, max 30-32; without a tick
+      avg 5.5-5.8, p99 10.3, max 15-17; all: avg 6.4-6.9, p99 16 (a third run was disturbed
+      from outside: no-tick p99 14.9, and three 0.5-1.2 s stalls inside PeekMessageA's window
+      pump). The first baseline (no-tick p99 17-20, max 28-30; tick p99 30-40) was mostly the
+      probes' own cost: their finishing work (~15 ms after a probed frame with a tick) landed in
+      the next, unflagged picture. What is left in pictures without a tick, all on the main
+      thread, never waiting for the turn (no other guest thread runs then), no page faults:
+      heavier scenes (twice the draws, ~8-10k imports a picture: CPU-bound, 10-17 ms) and the
+      host's Present blocking 2-5 ms now and then (driver/DWM queue, ~55 % of the pictures
+      that are 1.8x their neighbours). The tick is what remains. Findings for (a) (first
+      baseline's runs, with probes):
       (1) the tick calls Direct3D: IDirect3DDevice9::SetLight ~12.5 and SetTransform ~1 per
       tick (no Create*, Lock, Draw or Present); DirectSound ~45 calls per tick (3D buffer
       SetPosition/SetVelocity ~14/~13, and about once per tick DuplicateSoundBuffer, Play,

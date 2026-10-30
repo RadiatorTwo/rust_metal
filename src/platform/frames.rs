@@ -6,10 +6,14 @@
 //! time to produce it (from game_frame's start, or from the last Present when it was drawn
 //! outside game_frame), the host Present's own time, the logic ticks in its frame and their
 //! time (first tick part's start to the last one's end, `fps::TICK_PARTS`), whether it was a
-//! mission picture (variableUpdate on) and whether a page probe (below) ran in it. Every 2 s
+//! mission picture (variableUpdate on) and whether a page probe (below) ran in it or in the
+//! picture before (its finishing work lies in this interval); then where the main thread's time
+//! went since the last Present returned (`COLUMNS`: imports, waits for the turn and which other
+//! guest thread held it, the slowest import, page faults, the thread's CPU time). Every 2 s
 //! and at the end (ExitProcess) a summary goes to the log: average, 99th percentile and
 //! maximum of the intervals, for all pictures and separately for those whose frame ran a tick
-//! and those without; fps. Pictures with a probe are left out of the summaries.
+//! and those without; fps. Pictures with a probe are left out of the summaries, and the first
+//! mission picture (its interval reaches back into the loading) out of the mission's.
 //!
 //! Findings, logged once at the end:
 //! 1. every import called while the main thread is inside a tick part, by name, with calls per
@@ -18,7 +22,8 @@
 //! 2. time per tick part, and the tick's time outside its parts;
 //! 3. guest pages written per tick and per picture, by region (the EXE's sections, the heap,
 //!    Direct3D lock buffers, stacks), from the write watch the guest memory is reserved with
-//!    (`rt::Memory::reserve`): every 20th picture its frame is split into "before the tick",
+//!    (`rt::Memory::reserve`), only with `GUNMETAL_FRAMES_PAGES=1` (a probe costs ~4 ms of its
+//!    picture and the next one's; without probes no picture is left out): every 20th picture its frame is split into "before the tick",
 //!    "the ticks" and "drawing after the ticks up to Present", each with GetWriteWatch's reset;
 //! 4. pages written both by the ticks and by the drawing after them, by region, and the most
 //!    frequent ones. Reads are not observable this way; what the drawing reads is in the plan.
@@ -42,6 +47,10 @@ pub fn on() -> bool {
 
 thread_local! {
     static MAIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// this guest thread's start address (`thread_start`), for whose turn the main thread waited
+    static LABEL: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// when this thread took the turn
+    static TAKEN: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
 }
 
 /// Every how many pictures a page probe starts.
@@ -64,7 +73,8 @@ pub fn stats(v: &[f64]) -> Stats {
     }
     let mut s = v.to_vec();
     s.sort_by(f64::total_cmp);
-    let rank = ((0.99 * s.len() as f64).ceil() as usize).clamp(1, s.len());
+    // nearest rank, in integers: ceil(0.99 n)
+    let rank = (s.len() * 99).div_ceil(100).clamp(1, s.len());
     Stats { n: s.len(), avg: s.iter().sum::<f64>() / s.len() as f64, p99: s[rank - 1], max: s[s.len() - 1] }
 }
 
@@ -182,6 +192,20 @@ struct Frames {
     imports: HashMap<(bool, bool, usize), u64>,
     since_probe: u32,
     probe: Option<Probe>,
+    /// page probes are on (`GUNMETAL_FRAMES_PAGES=1`)
+    probes: bool,
+    /// the last picture was probed: this one's interval holds the probe's finishing work
+    after_probe: bool,
+    /// the last picture was a mission picture
+    last_mission: bool,
+    /// the last tick part's end (a tick whose last part never ran ends there)
+    last_part_end: Option<Instant>,
+    /// where this picture's time went (the main thread), since the last Present returned
+    detail: Detail,
+    /// rdtsc and the clock at the start, for thread cycles in ms
+    tsc0: (u64, Instant),
+    faults0: u32,
+    cycles0: u64,
     probe_cost: Vec<f64>,
     sections: Vec<(String, u32, u32)>,
     sum_before: PageSum,
@@ -200,12 +224,70 @@ struct Frames {
 
 static FRAMES: Mutex<Option<Frames>> = Mutex::new(None);
 
+/// The file's columns: when Present was called, the interval to the Present before, the time
+/// to produce the picture, the host Present, ticks and their time, mission picture, probed (or
+/// right after a probe); then, from the last Present's return to this one's call (the main
+/// thread): time in imports and their number, time waiting for the turn and how often, the
+/// other guest threads' time with the turn (all, and the longest holder `start:ms`), the import
+/// with the most time `name:ms`, our clear of the back buffer after the last Present, the
+/// process's page faults, the main thread's CPU time (cycles, in ms of the TSC).
+const COLUMNS: &str = "present_ms interval_ms produce_ms present_call_ms ticks tick_ms mission probe imports_ms imports wait_ms waits others_ms holder top_import clear_ms faults cpu_ms";
+
+#[derive(Default)]
+struct Detail {
+    imports: Duration,
+    calls: u32,
+    wait: Duration,
+    waits: u32,
+    /// other threads' time with the turn, by start address
+    held: Vec<(u32, Duration)>,
+    /// by thunk: time
+    by_import: HashMap<usize, Duration>,
+    clear: Duration,
+}
+
+#[cfg(target_arch = "x86_64")]
+fn tsc() -> u64 {
+    unsafe { core::arch::x86_64::_rdtsc() }
+}
+#[cfg(not(target_arch = "x86_64"))]
+fn tsc() -> u64 {
+    0
+}
+
+#[cfg(windows)]
+fn page_faults() -> u32 {
+    use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    let mut c: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
+    c.cb = size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+    unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) };
+    c.PageFaultCount
+}
+#[cfg(not(windows))]
+fn page_faults() -> u32 {
+    0
+}
+
+/// The calling thread's CPU cycles (QueryThreadCycleTime, in TSC ticks).
+#[cfg(windows)]
+fn thread_cycles() -> u64 {
+    use windows_sys::Win32::System::{Threading::GetCurrentThread, WindowsProgramming::QueryThreadCycleTime};
+    let mut c = 0u64;
+    unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut c) };
+    c
+}
+#[cfg(not(windows))]
+fn thread_cycles() -> u64 {
+    0
+}
+
 /// Turns the log on if `GUNMETAL_FRAMES` names a file; called on the main thread at start with
 /// the EXE's sections (name, start, end).
 pub fn init(sections: Vec<(String, u32, u32)>) {
     let Some(path) = std::env::var_os("GUNMETAL_FRAMES").filter(|p| !p.is_empty()) else { return };
     let mut out = std::io::BufWriter::new(std::fs::File::create(&path).expect("GUNMETAL_FRAMES file"));
-    let _ = writeln!(out, "# present_ms interval_ms produce_ms present_call_ms ticks tick_ms mission probe");
+    let _ = writeln!(out, "# {COLUMNS}");
     MAIN.set(true);
     *lock(&FRAMES) = Some(Frames {
         out,
@@ -225,6 +307,14 @@ pub fn init(sections: Vec<(String, u32, u32)>) {
         imports: HashMap::new(),
         since_probe: 0,
         probe: None,
+        probes: std::env::var_os("GUNMETAL_FRAMES_PAGES").is_some_and(|v| v != "0"),
+        after_probe: false,
+        last_mission: false,
+        last_part_end: None,
+        detail: Detail::default(),
+        tsc0: (tsc(), Instant::now()),
+        faults0: page_faults(),
+        cycles0: thread_cycles(),
         probe_cost: Vec::new(),
         sections,
         sum_before: PageSum::default(),
@@ -257,7 +347,15 @@ fn written(s: &mut Frames) -> Vec<u32> {
     let mut gran = 0u32;
     let base = mem().base;
     let r = unsafe { GetWriteWatch(1, base as _, crate::rt::GUEST_SPAN, s.watch.as_mut_ptr() as _, &mut count, &mut gran) };
-    let pages = if r == 0 { s.watch[..count].iter().map(|&a| ((a - base as usize) >> 12) as u32).collect() } else { Vec::new() };
+    let pages = if r == 0 {
+        s.watch[..count].iter().map(|&a| ((a - base as usize) >> 12) as u32).collect()
+    } else {
+        static WARNED: AtomicBool = AtomicBool::new(false);
+        if !WARNED.swap(true, Ordering::Relaxed) {
+            log!("frames: warn: GetWriteWatch failed ({r:#x}): page findings are empty");
+        }
+        Vec::new()
+    };
     if let Some(p) = s.probe.as_mut() {
         p.cost += t.elapsed();
     }
@@ -304,6 +402,36 @@ fn regions(s: &Frames) -> Regions {
 
 // ---- events -------------------------------------------------------------------------------------
 
+/// The calling host thread runs a guest thread started at `start` (for the turn's holders).
+pub fn thread_start(start: u32) {
+    LABEL.set(start);
+}
+
+/// The calling thread got the turn after waiting `waited` (None: it did not have to wait).
+pub fn turn_taken(waited: Option<Duration>) {
+    TAKEN.set(Some(Instant::now()));
+    if let Some(w) = waited.filter(|_| MAIN.get()) {
+        with(|s| {
+            s.detail.wait += w;
+            s.detail.waits += 1;
+        });
+    }
+}
+
+/// The calling thread gives up the turn.
+pub fn turn_given() {
+    let Some(t) = TAKEN.take() else { return };
+    if MAIN.get() {
+        return;
+    }
+    let d = t.elapsed();
+    let label = LABEL.get();
+    with(|s| match s.detail.held.iter_mut().find(|h| h.0 == label) {
+        Some(h) => h.1 += d,
+        None => s.detail.held.push((label, d)),
+    });
+}
+
 /// game_frame starts.
 pub fn frame_start() {
     let m = mem();
@@ -317,7 +445,10 @@ pub fn frame_start() {
 
 /// game_frame ends.
 pub fn frame_end() {
-    with(|s| s.frame_start = None);
+    with(|s| {
+        s.frame_start = None;
+        end_tick(s);
+    });
 }
 
 /// A tick part starts (outermost); the first one after a tick's end starts a tick. Returns
@@ -341,6 +472,21 @@ pub fn part_start() -> Instant {
     now
 }
 
+/// The running tick ends at its last part's end: when the last part (0x413c60) returns, or, if
+/// a tick stopped before it, when game_frame returns or Present is called.
+fn end_tick(s: &mut Frames) {
+    let Some(t0) = s.tick_start.take() else { return };
+    let end = s.last_part_end.unwrap_or(t0).max(t0);
+    s.tick_time += end - t0;
+    s.tick_wall += end - t0;
+    if s.probe.as_ref().is_some_and(|p| p.in_tick) {
+        let pages = written(s);
+        let p = s.probe.as_mut().unwrap();
+        p.in_tick = false;
+        union(&mut p.ticks, pages);
+    }
+}
+
 /// Tick part `i` (outermost) that started at `t` ended; the last part (0x413c60) ends a tick.
 pub fn part_end(i: usize, t: Instant) {
     let now = Instant::now();
@@ -350,17 +496,9 @@ pub fn part_end(i: usize, t: Instant) {
         p.0 += 1;
         p.1 += d;
         p.2 = p.2.max(d);
+        s.last_part_end = Some(now);
         if i == super::fps::TICK_PARTS.len() - 1 {
-            if let Some(t0) = s.tick_start.take() {
-                s.tick_time += now - t0;
-                s.tick_wall += now - t0;
-            }
-            if s.probe.as_ref().is_some_and(|p| p.in_tick) {
-                let pages = written(s);
-                let p = s.probe.as_mut().unwrap();
-                p.in_tick = false;
-                union(&mut p.ticks, pages);
-            }
+            end_tick(s);
         }
     });
 }
@@ -371,11 +509,27 @@ pub fn import(k: usize, in_tick: bool) {
     with(|s| *s.imports.entry((in_tick, main, k)).or_default() += 1);
 }
 
+/// Import `k` returned after `d` (its own time, without the wait for the turn after it).
+pub fn import_done(k: usize, d: Duration) {
+    if !MAIN.get() {
+        return;
+    }
+    with(|s| {
+        s.detail.imports += d;
+        s.detail.calls += 1;
+        *s.detail.by_import.entry(k).or_default() += d;
+    });
+}
+
+/// Our clear of the back buffer after Present took `d`.
+pub fn cleared(d: Duration) {
+    with(|s| s.detail.clear += d);
+}
+
 /// The game calls Present.
 pub fn before_present() {
     with(|s| {
-        let now = Instant::now();
-        s.present_call = Some(now);
+        end_tick(s);
         if s.probe.as_ref().is_some_and(|p| !p.in_tick) {
             let pages = written(s);
             let p = s.probe.as_mut().unwrap();
@@ -385,50 +539,81 @@ pub fn before_present() {
                 union(&mut p.before, pages);
             }
         }
+        // after the probe's work: it belongs to this (probed) picture
+        s.present_call = Some(Instant::now());
     });
+}
+
+fn ms(d: Duration) -> f64 {
+    d.as_secs_f64() * 1e3
 }
 
 /// The host's Present returned.
 pub fn after_present() {
     let mut summary = None;
+    let faults = page_faults();
+    let cycles = thread_cycles();
     with(|s| {
         let now = Instant::now();
         let call = s.present_call.take().unwrap_or(now);
-        let interval = s.last_present.map_or(0.0, |l| (call - l).as_secs_f64() * 1e3);
-        let produce = s.frame_start.or(s.last_present).map_or(0.0, |f| (call - f).as_secs_f64() * 1e3);
+        let interval = s.last_present.map_or(0.0, |l| ms(call - l));
+        let produce = s.frame_start.or(s.last_present).map_or(0.0, |f| ms(call - f));
         let probe = s.probe.take();
         let probed = probe.is_some();
         if let Some(p) = probe {
             finish_probe(s, p, s.ticks);
         }
+        // a probe's finishing work (above) lies in the next picture's interval
+        let disturbed = probed || s.after_probe;
+        s.after_probe = probed;
+        let d = std::mem::take(&mut s.detail);
+        let others: Duration = d.held.iter().map(|h| h.1).sum();
+        let holder = d.held.iter().max_by_key(|h| h.1).map_or("-".to_string(), |h| format!("{:#x}:{:.2}", h.0, ms(h.1)));
+        let top = d
+            .by_import
+            .iter()
+            .max_by_key(|e| *e.1)
+            .map_or("-".to_string(), |(&k, &t)| format!("{}:{:.2}", super::thunk_name(k).replace(' ', "_"), ms(t)));
+        let tsc_per_ms = tsc().wrapping_sub(s.tsc0.0) as f64 / ms(s.tsc0.1.elapsed()).max(1e-9);
         let _ = writeln!(
             s.out,
-            "{:.3} {interval:.3} {produce:.3} {:.3} {} {:.3} {} {}",
-            (call - s.t0).as_secs_f64() * 1e3,
-            (now - call).as_secs_f64() * 1e3,
+            "{:.3} {interval:.3} {produce:.3} {:.3} {} {:.3} {} {} {:.3} {} {:.3} {} {:.3} {holder} {top} {:.3} {} {:.3}",
+            ms(call - s.t0),
+            ms(now - call),
             s.ticks,
-            s.tick_time.as_secs_f64() * 1e3,
+            ms(s.tick_time),
             s.frame_mission as u8,
-            probed as u8
+            disturbed as u8,
+            ms(d.imports),
+            d.calls,
+            ms(d.wait),
+            d.waits,
+            ms(others),
+            ms(d.clear),
+            faults.wrapping_sub(s.faults0),
+            cycles.wrapping_sub(s.cycles0) as f64 / tsc_per_ms,
         );
+        s.faults0 = faults;
+        s.cycles0 = cycles;
         if s.last_present.is_some() {
-            s.pictures.push(Picture { at: call, interval, ticks: s.ticks, mission: s.frame_mission, probe: probed });
+            // the first mission picture's interval reaches back into the loading: not a mission one
+            let mission = s.frame_mission && s.last_mission;
+            s.pictures.push(Picture { at: call, interval, ticks: s.ticks, mission, probe: disturbed });
         }
+        s.last_mission = s.frame_mission;
         s.last_present = Some(call);
         s.ticks = 0;
         s.tick_time = Duration::ZERO;
         // the next frame is probed: the write watch starts from here
         s.since_probe += 1;
-        if s.since_probe >= PROBE_EVERY {
+        if s.probes && s.since_probe >= PROBE_EVERY {
             s.since_probe = 0;
             s.probe = Some(Probe::default());
             let _ = written(s);
         }
         let start = s.pictures.get(s.window).map(|p| p.at);
-        if let Some(start) = start.filter(|&t| call - t >= Duration::from_secs(2)) {
-            let all = &s.pictures[s.window..];
-            let w: Vec<(f64, u32)> = all.iter().filter(|p| !p.probe).map(|p| (p.interval, p.ticks)).collect();
-            summary = Some(summary_of(&w, all.len(), (call - start).as_secs_f64()));
+        if start.is_some_and(|t| call - t >= Duration::from_secs(2)) {
+            summary = Some(window_summary(&s.pictures[s.window..]));
             s.window = s.pictures.len();
             let _ = s.out.flush();
         }
@@ -438,10 +623,13 @@ pub fn after_present() {
     }
 }
 
-/// The summary of the pictures without a probe in `w`; fps counts all `n` pictures.
-fn summary_of(w: &[(f64, u32)], n: usize, seconds: f64) -> Summary {
-    let mut sm = summary(w, seconds);
-    sm.fps = if seconds > 0.0 { n as f64 / seconds } else { 0.0 };
+/// The summary of some pictures: the intervals of those without a probe; fps from all of them,
+/// their number over the sum of their intervals.
+fn window_summary<'a>(all: impl IntoIterator<Item = &'a Picture> + Clone) -> Summary {
+    let w: Vec<(f64, u32)> = all.clone().into_iter().filter(|p| !p.probe).map(|p| (p.interval, p.ticks)).collect();
+    let (n, ms) = all.into_iter().fold((0usize, 0.0), |a, p| (a.0 + 1, a.1 + p.interval));
+    let mut sm = summary(&w, 1.0);
+    sm.fps = if ms > 0.0 { n as f64 * 1e3 / ms } else { 0.0 };
     sm
 }
 
@@ -481,9 +669,8 @@ pub fn finish() {
     ON.store(false, Ordering::Relaxed);
     let _ = s.out.flush();
     let mission: Vec<&Picture> = s.pictures.iter().filter(|p| p.mission).collect();
-    if let (Some(a), Some(b)) = (mission.first(), mission.last()) {
-        let w: Vec<(f64, u32)> = mission.iter().filter(|p| !p.probe).map(|p| (p.interval, p.ticks)).collect();
-        log!("frames: mission pictures: {}", show_summary(&summary_of(&w, mission.len(), (b.at - a.at).as_secs_f64())));
+    if !mission.is_empty() {
+        log!("frames: mission pictures: {}", show_summary(&window_summary(mission.iter().copied())));
     }
     let names = |k: usize| super::thunk_name(k);
     let ticks = s.total_ticks.max(1) as f64;
@@ -532,7 +719,7 @@ pub fn finish() {
     let shown: Vec<String> = runs
         .iter()
         .take(24)
-        .map(|&(lo, hi, k)| format!("{:#x}..{:#x} ({}, {k}/{})", lo << 12, (hi + 1) << 12, r.of(lo << 12), s.sum_both.n))
+        .map(|&(lo, hi, k)| format!("{:#x}..{:#x} ({}, {k}/{})", lo << 12, (u64::from(hi) + 1) << 12, r.of(lo << 12), s.sum_both.n))
         .collect();
     log!("frames: (4) written by both, most often: {}", shown.join(", "));
 }

@@ -220,7 +220,11 @@ fn present(c: &mut Cpu) -> u32 {
         crate::platform::frames::after_present();
     }
     if r.is_ok() {
+        let t = frames.then(std::time::Instant::now);
         clear_back_buffer(p, v);
+        if let Some(t) = t {
+            crate::platform::frames::cleared(t.elapsed());
+        }
     }
     hr(r)
 }

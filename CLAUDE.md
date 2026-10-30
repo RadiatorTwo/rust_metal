@@ -256,9 +256,11 @@ Env: `GUNMETAL_TRACE_API` (imports with arguments), `GUNMETAL_TRACE_REG`, `GUNME
 `GUNMETAL_WINDOW=WxH`, `GUNMETAL_MONITOR=n`, `GUNMETAL_WATCH` (where the game is, every 2 s),
 `GUNMETAL_PROF`, `GUNMETAL_SAMPLE`, `GUNMETAL_STEPS`, `GUNMETAL_NO_MF` (music off),
 `GUNMETAL_COUNT=<file>`, `GUNMETAL_FRAMES=<file>` (per picture: Present time, interval, time to
-produce it, ticks and their time; summaries every 2 s and at ExitProcess; at the exit the imports
-called inside ticks, time per tick part, and guest pages written by the ticks and the drawing, from
-write-watch probes every 20th picture, which the summaries leave out), `GUNMETAL_SHOT=shot/x.png` (the back buffer before Present, at most every
+produce it, ticks and their time, and where the main thread's time went: imports, the slowest one,
+waits for the turn and who held it, page faults, CPU time; summaries every 2 s and at ExitProcess;
+at the exit the imports called inside ticks and time per tick part; with `GUNMETAL_FRAMES_PAGES=1`
+also guest pages written by the ticks and the drawing, from write-watch probes every 20th picture,
+which the summaries leave out with the picture after each), `GUNMETAL_SHOT=shot/x.png` (the back buffer before Present, at most every
 `GUNMETAL_SHOT_MS`, 500; `{t}` in the name: ms since start; `shot/` is git-ignored: game imagery is
 never committed).
 

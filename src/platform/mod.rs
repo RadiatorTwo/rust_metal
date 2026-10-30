@@ -368,6 +368,7 @@ fn turn_take() {
     let mut t = lock(&TURN.tickets);
     let me = t.0;
     t.0 += 1;
+    let waited = (t.1 != me && frames::on()).then(std::time::Instant::now);
     while t.1 != me {
         // the running thread hands over at its next loop head
         rt::POLL.store(1, Ordering::Relaxed);
@@ -375,6 +376,10 @@ fn turn_take() {
     }
     rt::POLL.store((t.0 != t.1 + 1) as u32, Ordering::Relaxed);
     HELD.set(true);
+    drop(t);
+    if frames::on() {
+        frames::turn_taken(waited.map(|w| w.elapsed()));
+    }
 }
 
 fn turn_give() {
@@ -382,6 +387,9 @@ fn turn_give() {
         return;
     }
     HELD.set(false);
+    if frames::on() {
+        frames::turn_given();
+    }
     let mut t = lock(&TURN.tickets);
     t.1 += 1;
     rt::POLL.store((t.0 != t.1) as u32, Ordering::Relaxed);
@@ -492,7 +500,7 @@ fn on_event(c: &mut Cpu, e: Event) {
             if frames::on() {
                 frames::import(k, fps::in_tick());
             }
-            let t0 = prof().then(std::time::Instant::now);
+            let t0 = (prof() || frames::on()).then(std::time::Instant::now);
             turn_give();
             sample::IN_IMPORT.store(k + 1, Ordering::Relaxed);
             let r = f(c);
@@ -501,9 +509,14 @@ fn on_event(c: &mut Cpu, e: Event) {
                 log!("  -> {r:#x}");
             }
             sample::IN_IMPORT.store(0, Ordering::Relaxed);
-            let t1 = prof().then(std::time::Instant::now);
-            turn_take();
+            let t1 = t0.map(|_| std::time::Instant::now());
             if let (Some(t0), Some(t1)) = (t0, t1) {
+                if frames::on() {
+                    frames::import_done(k, t1 - t0);
+                }
+            }
+            turn_take();
+            if let (Some(t0), Some(t1)) = (t0.filter(|_| prof()), t1) {
                 prof_add(k, t1 - t0, t1.elapsed());
             }
             c.r[EAX] = r;
@@ -910,6 +923,7 @@ pub fn run_game(game: &crate::game::Game, game_dir: PathBuf) -> u32 {
     c.fs_base = TIB;
     c.r[ESP] = STACK_HI - 64;
     crash::register(crash::Kind::Main, game.exe.entry, TIB);
+    frames::thread_start(game.exe.entry);
     frames::init(game.exe.sections.iter().map(|s| (s.name.clone(), s.va, s.va + s.vsize.max(s.rsize))).collect());
     turn_take();
     c.r[ESP] -= 4;

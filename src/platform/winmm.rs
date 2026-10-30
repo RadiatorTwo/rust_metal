@@ -37,6 +37,7 @@ fn time_set_event(c: &mut Cpu) -> u32 {
         .spawn(move || {
             let mut tc = super::new_thread_cpu();
             super::crash::register(super::crash::Kind::Timer, proc_, tc.fs_base);
+            super::frames::thread_start(proc_);
             let start = Instant::now();
             let mut n = 1u64;
             loop {
