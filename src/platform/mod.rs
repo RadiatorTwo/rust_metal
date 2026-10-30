@@ -20,6 +20,10 @@ pub mod fps;
 pub mod gdi32;
 pub mod hud;
 pub mod kernel32;
+#[cfg(windows)]
+pub mod mf;
+#[cfg(windows)]
+pub mod music;
 pub mod ole32;
 pub mod sample;
 pub mod user32;

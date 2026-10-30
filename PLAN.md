@@ -129,7 +129,11 @@ Updated 2026-10-30. Details on how things work: CLAUDE.md. Design:
       game's needs its menu, which takes keys only in parts)
 - [ ] DirectInput: buffered keyboard data (GetDeviceData; the game uses it for short presses),
       joysticks (gamepads), the exclusive mouse's relative movement at the window's edge
-- [ ] Videos (`.wmv`) and music: the graph skips them now (`dshow.rs`)
+- [x] Music (Task 9): a graph given a sound file plays it (`dshow.rs`, `music.rs`, `mf.rs`:
+      Media Foundation decodes the WMA, waveOut plays it, put_Volume scales it, EC_COMPLETE
+      at the end, the game loops it); tests `tests/mf.rs`. To be confirmed by ear: front-end
+      music, the menu's music volume, mission music
+- [ ] Videos (`.wmv`): the graph still skips them (`dshow.rs`)
 - [ ] Direct3D 9 still open: volume textures, swap chains, GetDC, GetAdapterMonitor (none
       called by the front end)
 - [ ] Imports bound to "not implemented" (stop when called): CreateProcessA,

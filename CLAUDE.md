@@ -88,8 +88,14 @@ CLSID: built-in DirectInput, filter graph and VMR9, and `ole32::register_class(c
 for later modules; an unknown CLSID gives REGDB_E_CLASSNOTREG and a log line), `dinput.rs`
 (DirectInput 7 from rustschweine: keyboard and mouse by state from the window's input, no
 buffered data yet, no joysticks yet), `dshow.rs` (our own DirectShow filter graph and VMR9:
-videos and sound files are skipped, Run posts EC_COMPLETE and the position is the end, 0; the
-graph is the object later tasks play music through), `dsound.rs` (DirectSound 8 passed through to the system's dsound.dll as `d3d9/` is:
+videos are skipped, Run posts EC_COMPLETE and the position is the end, 0; a sound file
+(RenderFile: data\music\*.wma, by the game's music object, music_* in symbols.txt) gets a
+player, `music.rs`: a host thread decodes it with `mf.rs` (Media Foundation's IMFSourceReader to
+16-bit PCM; MFStartup once; `mf::available` asks for a WMA decoder, `GUNMETAL_NO_MF=1` says
+no: "no Media Foundation WMA decoder: music off" and the music is silent, ended at once) and
+plays it through waveOut, put_Volume scaling the samples; at the end of the file EC_COMPLETE
+through the graph's event (set by `kernel32::set_event_state` from the host thread), and the
+game loops by SetPositions(0)), `dsound.rs` (DirectSound 8 passed through to the system's dsound.dll as `d3d9/` is:
 IDirectSound8, IDirectSoundBuffer8, IDirectSound3DBuffer/Listener, IDirectSoundNotify as guest
 COM objects; DSBUFFERDESC's format pointer points at the game's WAVEFORMATEX in place; Lock gives
 parts in a guest shadow of the whole buffer, first part at the lock's offset, a wrapped second
@@ -223,7 +229,7 @@ How the game starts (`GUNMETAL_TRACE_API=1` shows every import call):
 Env: `GUNMETAL_TRACE_API` (imports with arguments), `GUNMETAL_TRACE_REG`, `GUNMETAL_TRACE_MSG`,
 `GUNMETAL_INPUT` (scripted input, see `window.rs`; real keyboard and mouse ignored), `GUNMETAL_WINDOW=WxH`,
 `GUNMETAL_MONITOR=n`, `GUNMETAL_WATCH` (where the game is, every 2 s), `GUNMETAL_PROF`,
-`GUNMETAL_SAMPLE`, `GUNMETAL_STEPS`, `GUNMETAL_COUNT=<file>`, `GUNMETAL_SHOT=shot/x.png` (the back buffer
+`GUNMETAL_SAMPLE`, `GUNMETAL_STEPS`, `GUNMETAL_NO_MF` (music off), `GUNMETAL_COUNT=<file>`, `GUNMETAL_SHOT=shot/x.png` (the back buffer
 before Present, at most every `GUNMETAL_SHOT_MS`, 500; `{t}` in the name: ms since start;
 `shot/` is git-ignored: game imagery is never committed).
 

@@ -1,7 +1,26 @@
-//! DirectShow: our own filter graph (CLSID_FilterGraph) and Video Mixing Renderer 9, enough
-//! for the game's videos to start and end at once. Videos are not played yet: the game goes on
-//! as if each one had ended. Sound files (.wma, .wav) take the same way, silent, for now; a
-//! later task plays music through the same graph.
+//! DirectShow: our own filter graph (CLSID_FilterGraph) and Video Mixing Renderer 9. Music
+//! plays (sound files go to a player of their own, `music.rs`, decoded by Media Foundation,
+//! `mf.rs`); videos are not played yet: they start and end at once, and the game goes on as if
+//! each one had ended.
+//!
+//! The game's music (music_* in data/symbols.txt; class vtable 0x5e5ac8): music_start
+//! (0x467c90) makes a "done" event and a worker thread (0x4690b0) whose open callback is
+//! music_open (0x467eb0), on that thread: CoCreateInstance(CLSID_FilterGraph), QueryInterface
+//! IMediaControl (+0x118), IBasicAudio (+0x11c), IMediaEventEx (+0x120), IMediaSeeking
+//! (+0x124), GetEventHandle (+0x12c), which the worker waits for, RenderFile of the full path
+//! ("C:\Spiele\Gun Metal\data\music\new_frontend.wma" in the front end), put_Volume
+//! (music_volume_db 0x468390: 2000 log10 of the setting, clamped to -10000..0) and Run. When
+//! the event is set the worker calls music_on_event (0x468140): GetEvent(timeout 0) until there
+//! are none; EC_COMPLETE seeks to 0 with IMediaSeeking::SetPositions (looping, +9) or sets the
+//! done event; FreeEventParams each. music_pause (0x467d90) and music_resume (0x467dd0) are
+//! IMediaControl Pause and Run, music_set_volume (0x467e50) put_Volume; music_close
+//! (0x468280) releases the interfaces.
+//!
+//! So a graph given a sound file (RenderFile, AddSourceFilter) gets a player: Run, Pause, Stop
+//! drive it, put_Volume is its volume, IMediaSeeking and IMediaPosition its position and
+//! duration (from the decoder), and at the end of the file it posts EC_COMPLETE through the
+//! graph's event (`Player::take_complete`). Without Media Foundation's WMA decoder
+//! (`mf::available`) sound files take the videos' way: silent, ended at once.
 //!
 //! The game's videos (video_start 0x4174a0: the intro "data\frontend\cgplayed_01.wmv", the
 //! attract loop "attract_ps.wmv"; "_h.wmv" instead of ".wmv" for high quality) take one of two
@@ -25,7 +44,7 @@
 //! loops, seeks to 0), draws it, sleeps 25 ms and asks whether it ended (vmr9_ended 0x583b70,
 //! vtex_ended 0x586360): IMediaPosition duration minus current position below 1 ms.
 //!
-//! So our graph reports duration 0 and position 0, and Run posts EC_COMPLETE (1) to its event
+//! So a video graph reports duration 0 and position 0, and Run posts EC_COMPLETE (1) to its event
 //! queue (IMediaEvent; the event handle from GetEventHandle is set while events wait). The
 //! source filter has no pins, so nothing is rendered; the VMR9 never asks its allocator for
 //! surfaces. The graph holds a reference to each filter added (as DirectShow, which the game's
@@ -38,6 +57,8 @@
 use super::kernel32::{self, Obj};
 use super::ole32::{guid, guid_at, guid_string};
 use super::{Import, arg, com_new, free, guest_call, lock, log, mem, method_not_implemented as nimp, wstr};
+#[cfg(windows)]
+use super::music::Player;
 use crate::rt::Cpu;
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -119,7 +140,8 @@ pub const PAUSED: u32 = 1;
 pub const RUNNING: u32 = 2;
 
 /// A filter graph: the filters added (guest interface pointers, one reference each), the
-/// files it was given, its state, events, volume and balance (IBasicAudio, hundredths of dB).
+/// files it was given, its state, events, volume and balance (IBasicAudio, hundredths of dB),
+/// and the player of its sound file.
 #[derive(Default)]
 pub struct Graph {
     pub filters: Vec<u32>,
@@ -128,17 +150,51 @@ pub struct Graph {
     pub events: Events,
     pub volume: i32,
     pub balance: i32,
+    music: Option<Player>,
 }
 
-/// Whether a file is sound only (silent for now).
+/// Without Windows there is no music: no player is ever made.
+#[cfg(not(windows))]
+enum Player {}
+#[cfg(not(windows))]
+#[rustfmt::skip]
+impl Player {
+    fn run(&self) { match *self {} }
+    fn pause(&self) { match *self {} }
+    fn seek(&self, _: u64) { match *self {} }
+    fn set_volume(&self, _: i32) { match *self {} }
+    fn set_event(&self, _: u32) { match *self {} }
+    fn take_complete(&self) -> bool { match *self {} }
+    fn complete_waits(&self) -> bool { match *self {} }
+    fn ended(&self) -> bool { match *self {} }
+    fn times(&self) -> (u64, u64) { match *self {} }
+}
+
+/// Whether a file is sound only.
 pub fn is_audio(path: &str) -> bool {
     let p = path.to_ascii_lowercase();
     [".wma", ".wav", ".mp3"].iter().any(|e| p.ends_with(e))
 }
 
+/// A player for the sound file `path` (a guest path), if music can be played.
+#[cfg(windows)]
+fn open_music(path: &str, event: u32, volume: i32) -> Option<Player> {
+    super::mf::available().then(|| Player::open(super::host_path(path), event, volume))
+}
+
+#[cfg(not(windows))]
+fn open_music(_: &str, _: u32, _: i32) -> Option<Player> {
+    None
+}
+
 fn note_file(g: &mut Graph, path: String) {
     if is_audio(&path) {
-        log!("dshow: {path}: sound is not played yet (silent, ends at once)");
+        g.music = open_music(&path, g.events.handle, g.volume);
+        if g.music.is_some() {
+            log!("dshow: {path}: music");
+        } else {
+            log!("dshow: {path}: sound is not played (silent, ends at once)");
+        }
     } else {
         log!("dshow: {path}: video is skipped (ends at once)");
     }
@@ -295,7 +351,9 @@ fn release_ours(c: Option<&mut Cpu>, this: u32) -> u32 {
         free(b);
     }
     let held: Vec<u32> = match gone.kind {
-        Kind::Graph(g) => {
+        Kind::Graph(mut g) => {
+            // the player's thread ends before the event it sets goes
+            drop(g.music.take());
             if g.events.handle != 0 {
                 kernel32::objects().remove(g.events.handle);
             }
@@ -477,24 +535,34 @@ pub static GRAPH_BUILDER: &[Import] = &[
 
 // ---- IMediaControl ----------------------------------------------------------------------------
 
-/// Run: the media ends at once (EC_COMPLETE) when the graph was not running.
+/// Run: music plays; anything else ends at once (EC_COMPLETE) when the graph was not running.
 fn run(c: &mut Cpu) -> u32 {
     with_graph(arg(c, 0), |g| {
-        if g.state != RUNNING {
-            g.state = RUNNING;
+        if let Some(p) = &g.music {
+            p.run();
+        } else if g.state != RUNNING {
             g.events.post(EC_COMPLETE, S_OK, 0);
         }
+        g.state = RUNNING;
     });
     S_OK
 }
 
+/// Pause and Stop: music halts where it is.
+fn halt(g: &mut Graph, state: u32) {
+    if let Some(p) = &g.music {
+        p.pause();
+    }
+    g.state = state;
+}
+
 fn pause(c: &mut Cpu) -> u32 {
-    with_graph(arg(c, 0), |g| g.state = PAUSED);
+    with_graph(arg(c, 0), |g| halt(g, PAUSED));
     S_OK
 }
 
 fn stop(c: &mut Cpu) -> u32 {
-    with_graph(arg(c, 0), |g| g.state = STOPPED);
+    with_graph(arg(c, 0), |g| halt(g, STOPPED));
     S_OK
 }
 
@@ -533,14 +601,30 @@ pub static MEDIA_CONTROL: &[Import] = &[
 // ---- IMediaEventEx ----------------------------------------------------------------------------
 
 fn get_event_handle(c: &mut Cpu) -> u32 {
-    let h = with_graph(arg(c, 0), |g| g.events.handle());
+    let h = with_graph(arg(c, 0), |g| {
+        let h = g.events.handle();
+        if let Some(p) = &g.music {
+            p.set_event(h);
+        }
+        h
+    });
     put32(arg(c, 1), h)
 }
 
-/// GetEvent(code, param1, param2, timeout): the next event; none: E_ABORT at once (nothing
-/// comes later by itself).
+/// GetEvent(code, param1, param2, timeout): the next event (the player's EC_COMPLETE joins the
+/// queue first); none: E_ABORT at once (the game waits for the handle, not here).
 fn get_event(c: &mut Cpu) -> u32 {
-    let e = with_graph(arg(c, 0), |g| g.events.get());
+    let e = with_graph(arg(c, 0), |g| {
+        if g.music.as_ref().is_some_and(Player::take_complete) {
+            g.events.post(EC_COMPLETE, S_OK, 0);
+        }
+        let e = g.events.get();
+        // the player may have finished in between: then its event stays set
+        if g.music.as_ref().is_some_and(Player::complete_waits) {
+            kernel32::set_event_state(g.events.handle(), true);
+        }
+        e
+    });
     let [code, p1, p2] = e.unwrap_or([0; 3]);
     for (k, v) in [code, p1, p2].into_iter().enumerate() {
         if arg(c, 1 + k as u32) != 0 {
@@ -550,9 +634,9 @@ fn get_event(c: &mut Cpu) -> u32 {
     if e.is_some() { S_OK } else { E_ABORT }
 }
 
-/// WaitForCompletion(timeout, code): complete once it ran.
+/// WaitForCompletion(timeout, code): complete once it ran (music: once it played to the end).
 fn wait_for_completion(c: &mut Cpu) -> u32 {
-    let ran = with_graph(arg(c, 0), |g| g.state == RUNNING);
+    let ran = with_graph(arg(c, 0), |g| g.state == RUNNING && g.music.as_ref().is_none_or(Player::ended));
     put32(arg(c, 2), if ran { EC_COMPLETE } else { 0 });
     if ran { S_OK } else { E_ABORT }
 }
@@ -576,10 +660,42 @@ pub static MEDIA_EVENT: &[Import] = &[
     ("IMediaEventEx::GetNotifyFlags", 2, nimp),
 ];
 
-// ---- IMediaPosition: at the end, which is 0 ---------------------------------------------------
+// ---- IMediaPosition: seconds; a video is at its end, which is 0 -------------------------------
+
+/// (position, duration) of the graph's music in 100 ns units; (0, 0) without.
+fn times(this: u32) -> (u64, u64) {
+    with_graph(this, |g| g.music.as_ref().map_or((0, 0), Player::times))
+}
+
+fn seek(this: u32, t: u64) {
+    with_graph(this, |g| {
+        if let Some(p) = &g.music {
+            p.seek(t);
+        }
+    });
+}
+
+fn seconds(t: u64) -> [u8; 8] {
+    (t as f64 / 1e7).to_le_bytes()
+}
 
 fn zero_f64(c: &mut Cpu) -> u32 {
     put64(arg(c, 1), 0f64.to_le_bytes())
+}
+
+fn duration_f64(c: &mut Cpu) -> u32 {
+    put64(arg(c, 1), seconds(times(arg(c, 0)).1))
+}
+
+fn position_f64(c: &mut Cpu) -> u32 {
+    put64(arg(c, 1), seconds(times(arg(c, 0)).0))
+}
+
+/// put_CurrentPosition(double: two stack slots)
+fn put_position(c: &mut Cpu) -> u32 {
+    let s = f64::from_bits(arg(c, 1) as u64 | (arg(c, 2) as u64) << 32);
+    seek(arg(c, 0), (s.max(0.0) * 1e7) as u64);
+    S_OK
 }
 
 fn one_f64(c: &mut Cpu) -> u32 {
@@ -598,10 +714,10 @@ pub static MEDIA_POSITION: &[Import] = &[
     ("IMediaPosition::GetTypeInfo", 4, not_impl),
     ("IMediaPosition::GetIDsOfNames", 6, not_impl),
     ("IMediaPosition::Invoke", 9, not_impl),
-    ("IMediaPosition::get_Duration", 2, zero_f64),
-    ("IMediaPosition::put_CurrentPosition", 3, ok),
-    ("IMediaPosition::get_CurrentPosition", 2, zero_f64),
-    ("IMediaPosition::get_StopTime", 2, zero_f64),
+    ("IMediaPosition::get_Duration", 2, duration_f64),
+    ("IMediaPosition::put_CurrentPosition", 3, put_position),
+    ("IMediaPosition::get_CurrentPosition", 2, position_f64),
+    ("IMediaPosition::get_StopTime", 2, duration_f64),
     ("IMediaPosition::put_StopTime", 3, ok),
     ("IMediaPosition::get_PrerollTime", 2, zero_f64),
     ("IMediaPosition::put_PrerollTime", 3, ok),
@@ -611,7 +727,7 @@ pub static MEDIA_POSITION: &[Import] = &[
     ("IMediaPosition::CanSeekBackward", 2, oa_true),
 ];
 
-// ---- IMediaSeeking: media time, at the end, which is 0 ----------------------------------------
+// ---- IMediaSeeking: media time (100 ns); a video is at its end, which is 0 --------------------
 
 /// GetCapabilities: absolute, forwards, backwards, current and stop position, duration.
 fn seeking_caps(c: &mut Cpu) -> u32 {
@@ -650,13 +766,50 @@ fn zero_i64(c: &mut Cpu) -> u32 {
     put64(arg(c, 1), [0; 8])
 }
 
-/// GetPositions, GetAvailable(first, second): 0 and 0.
-fn two_zero_i64(c: &mut Cpu) -> u32 {
-    for k in 1..3 {
+fn duration_i64(c: &mut Cpu) -> u32 {
+    put64(arg(c, 1), times(arg(c, 0)).1.to_le_bytes())
+}
+
+fn position_i64(c: &mut Cpu) -> u32 {
+    put64(arg(c, 1), times(arg(c, 0)).0.to_le_bytes())
+}
+
+/// Two out parameters: `first` and the duration.
+fn first_and_duration(c: &mut Cpu, first: u64) -> u32 {
+    let (_, d) = times(arg(c, 0));
+    for (k, v) in [(1, first), (2, d)] {
         if arg(c, k) != 0 {
-            put64(arg(c, k), [0; 8]);
+            put64(arg(c, k), v.to_le_bytes());
         }
     }
+    S_OK
+}
+
+/// GetPositions(current, stop): the position and the end.
+fn get_positions(c: &mut Cpu) -> u32 {
+    let p = times(arg(c, 0)).0;
+    first_and_duration(c, p)
+}
+
+/// GetAvailable(earliest, latest): all of it.
+fn get_available(c: &mut Cpu) -> u32 {
+    first_and_duration(c, 0)
+}
+
+/// SetPositions(current, current flags, stop, stop flags): the current position, absolute (1)
+/// or relative (2) to where it is; the stop position stays the end.
+fn set_positions(c: &mut Cpu) -> u32 {
+    let (this, p, flags) = (arg(c, 0), arg(c, 1), arg(c, 2));
+    if p == 0 {
+        return S_OK;
+    }
+    let v = i64::from_le_bytes(mem().slice(p, 8).try_into().unwrap());
+    let t = match flags & 3 {
+        1 => v,
+        2 => times(this).0 as i64 + v,
+        _ => return S_OK,
+    };
+    seek(this, t.max(0) as u64);
     S_OK
 }
 
@@ -680,13 +833,13 @@ pub static MEDIA_SEEKING: &[Import] = &[
     ("IMediaSeeking::GetTimeFormat", 2, get_time_format),
     ("IMediaSeeking::IsUsingTimeFormat", 2, is_media_time),
     ("IMediaSeeking::SetTimeFormat", 2, set_time_format),
-    ("IMediaSeeking::GetDuration", 2, zero_i64),
-    ("IMediaSeeking::GetStopPosition", 2, zero_i64),
-    ("IMediaSeeking::GetCurrentPosition", 2, zero_i64),
+    ("IMediaSeeking::GetDuration", 2, duration_i64),
+    ("IMediaSeeking::GetStopPosition", 2, duration_i64),
+    ("IMediaSeeking::GetCurrentPosition", 2, position_i64),
     ("IMediaSeeking::ConvertTimeFormat", 6, convert_time_format),
-    ("IMediaSeeking::SetPositions", 5, ok),
-    ("IMediaSeeking::GetPositions", 3, two_zero_i64),
-    ("IMediaSeeking::GetAvailable", 3, two_zero_i64),
+    ("IMediaSeeking::SetPositions", 5, set_positions),
+    ("IMediaSeeking::GetPositions", 3, get_positions),
+    ("IMediaSeeking::GetAvailable", 3, get_available),
     ("IMediaSeeking::SetRate", 3, ok),
     ("IMediaSeeking::GetRate", 2, one_f64),
     ("IMediaSeeking::GetPreroll", 2, zero_i64),
@@ -696,7 +849,15 @@ pub static MEDIA_SEEKING: &[Import] = &[
 
 fn put_volume(c: &mut Cpu) -> u32 {
     let v = arg(c, 1) as i32;
-    with_graph(arg(c, 0), |g| g.volume = v);
+    if !(-10000..=0).contains(&v) {
+        return E_INVALIDARG;
+    }
+    with_graph(arg(c, 0), |g| {
+        g.volume = v;
+        if let Some(p) = &g.music {
+            p.set_volume(v);
+        }
+    });
     S_OK
 }
 

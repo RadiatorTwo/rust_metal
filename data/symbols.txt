@@ -166,6 +166,20 @@
 0x468580 stream_set_notify    thiscall: SetNotificationPositions at 0x1fff, 0x3fff, 0x5fff, all on the event +0x130 (CreateEventA manual reset, 0x468c20)
 0x469300 stream_thread        thiscall: WaitForMultipleObjects on its stop event and the stream's events, the callback (+0x3c) refills the third that has played
 
+# Music (dshow.rs, music.rs): one object (vtable 0x5e5ac8) per track, a DirectShow filter graph on a worker thread (the class of stream_thread)
+0x467b90 music_ctor           thiscall: interfaces at +0x114 (IGraphBuilder), +0x118 (IMediaControl), +0x11c (IBasicAudio), +0x120 (IMediaEventEx), +0x124 (IMediaSeeking), worker +0x128, graph event +0x12c, done event +0x130
+0x467c10 music_dtor           music_stop, deletes the worker, CloseHandle(done event)
+0x467c90 music_start          thiscall(volume): path at +0xb, CreateEventA (done, manual reset) -> +0x130, volume -> +0x110, worker (0x4690b0) with callbacks open 0x468300 (music_open), event 0x468330 (music_on_event), close 0x468360 (music_close)
+0x467d90 music_pause          IMediaControl::Pause, +0xa = 1
+0x467dd0 music_resume         IMediaControl::Run, +0xa = 0
+0x467e10 music_stop           SetEvent(done), ends the worker (0x469420)
+0x467e50 music_set_volume     thiscall(hundredths of dB): IBasicAudio::put_Volume
+0x467e90 music_done           true when the worker no longer runs
+0x467eb0 music_open           on the worker: CoInitialize, CoCreateInstance(CLSID_FilterGraph), the interfaces, GetEventHandle (the worker waits for it, 0x469160), RenderFile(path), put_Volume(music_volume_db(+0x110)), Run
+0x468140 music_on_event       thiscall(0 event, 1 stop): GetEvent(timeout 0) until none; EC_COMPLETE: looping (+9) SetPositions(0, absolute), else SetEvent(done); FreeEventParams; ResetEvent(graph event). 1: IMediaControl::Stop, ResetEvent(done)
+0x468280 music_close          releases the interfaces
+0x468390 music_volume_db      0..1 to hundredths of dB: 2000 log10(v), -10000..0
+
 # Start-up data
 0x664738 d3d_result           what d3d_create returned (game_start skips to an error message for 1 and 2)
 0x675390 d3d9                 the IDirect3D9
