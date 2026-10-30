@@ -6,19 +6,28 @@
 //! Scripted runs (`GUNMETAL_INPUT`) get only their script's keys and mouse: the real keyboard
 //! and mouse are ignored (`reaches_game`), so someone using the machine cannot steer a test
 //! run into a new game. The window's close button and focus changes still count.
+//!
+//! The cursor: the game takes the mouse through DirectInput, exclusive while its window is in
+//! front, and draws its own cursor from the mouse's movement; it never calls ShowCursor.
+//! DirectInput then hid the cursor and kept it in the window. Here an exclusive mouse that is
+//! acquired asks for that (`catch_mouse`, from any thread); the window hides the cursor and
+//! confines it while it has the focus, and frees it when the mouse is unacquired or the focus
+//! goes (Windows drops a confinement then; it is set again when the focus comes back). Not in
+//! scripted runs: the real mouse is not the game's there.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread::ThreadId;
 use std::time::Duration;
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::platform::pump_events::EventLoopExtPumpEvents;
-use winit::window::{Window, WindowId};
+use winit::window::{CursorGrabMode, Window, WindowId};
 
 /// Input for the game, in game terms: Windows virtual-key codes and client pixels of the size
 /// the game gave its window.
@@ -29,7 +38,9 @@ pub enum Input {
     Key { vk: u8, scan: u8, down: bool, repeat: bool },
     Char(u8),
     Move(i32, i32),
-    /// 0 left, 1 right, 2 middle
+    /// raw mouse movement (mickeys, not limited by the window or the screen's edge)
+    Motion(i32, i32),
+    /// 0 left, 1 right, 2 middle, 3 back, 4 forward
     Button(u8, bool),
     /// mouse wheel: lines, positive away from the user
     Wheel(i32),
@@ -46,7 +57,7 @@ pub fn reaches_game(i: &Input, scripted: bool) -> bool {
 }
 
 /// This run is scripted (`GUNMETAL_INPUT` is set).
-fn scripted_run() -> bool {
+pub fn scripted_run() -> bool {
     static S: OnceLock<bool> = OnceLock::new();
     *S.get_or_init(|| std::env::var_os("GUNMETAL_INPUT").is_some())
 }
@@ -60,6 +71,10 @@ struct App {
     fitted: (u32, u32),
     /// the game hid the cursor (ShowCursor)
     cursor_hidden: bool,
+    /// the window has the focus
+    focused: bool,
+    /// the cursor is hidden and confined for an exclusive DirectInput mouse (`catch_cursor`)
+    caught: bool,
     window: Option<Window>,
     /// the client size the game asked for (input positions are in its pixels)
     game_size: (u32, u32),
@@ -105,6 +120,8 @@ fn with_host<R>(f: impl FnOnce(&mut Host) -> R) -> R {
                     device_fullscreen: false,
                     fitted: (0, 0),
                     cursor_hidden: false,
+                    focused: false,
+                    caught: false,
                     window: None,
                     game_size: (640, 480),
                     input: VecDeque::new(),
@@ -211,9 +228,29 @@ pub fn set_cursor_hidden(hidden: bool) {
     with_host(|host| {
         host.app.cursor_hidden = hidden;
         if let Some(w) = &host.app.window {
-            w.set_cursor_visible(!hidden);
+            w.set_cursor_visible(!hidden && !host.app.caught);
         }
     });
+}
+
+/// An exclusive DirectInput mouse was acquired (true) or unacquired or released (false): the
+/// cursor is caught while that holds and the window has the focus. From any thread; the main
+/// thread applies it at its next pump.
+pub fn catch_mouse(on: bool) {
+    CATCH.store(on, Ordering::Relaxed);
+}
+
+static CATCH: AtomicBool = AtomicBool::new(false);
+
+/// Whether an exclusive DirectInput mouse wants the cursor caught (`catch_mouse`).
+pub fn catch_wanted() -> bool {
+    CATCH.load(Ordering::Relaxed)
+}
+
+/// Whether the cursor is to be hidden and confined to the window: an exclusive mouse is
+/// acquired, the window has the focus, and the run is not scripted.
+pub fn should_catch(acquired: bool, focused: bool, scripted: bool) -> bool {
+    acquired && focused && !scripted
 }
 
 /// The Direct3D device is windowed: input positions are in pixels of the game's main window
@@ -254,6 +291,7 @@ pub fn pump(wait: Duration) {
     }
     with_host(|h| {
         let _ = h.event_loop.pump_app_events(Some(wait), &mut h.app);
+        h.app.catch_cursor();
         scripted(&mut h.app.input);
     });
 }
@@ -454,6 +492,25 @@ impl App {
         }
     }
 
+    /// Hide the cursor and confine it to the window, or free it, as `should_catch` says.
+    fn catch_cursor(&mut self) {
+        let Some(win) = &self.window else { return };
+        let catch = should_catch(CATCH.load(Ordering::Relaxed), self.focused, scripted_run());
+        if catch == self.caught {
+            return;
+        }
+        self.caught = catch;
+        win.set_cursor_visible(!catch && !self.cursor_hidden);
+        let grab = if catch {
+            win.set_cursor_grab(CursorGrabMode::Confined).or_else(|_| win.set_cursor_grab(CursorGrabMode::Locked))
+        } else {
+            win.set_cursor_grab(CursorGrabMode::None)
+        };
+        if let Err(e) = grab {
+            super::log!("warn: cursor grab: {e}");
+        }
+    }
+
     /// Input from the real window, for the game unless a script drives this run.
     fn real(&mut self, i: Input) {
         if reaches_game(&i, scripted_run()) {
@@ -485,7 +542,11 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, e: WindowEvent) {
         match e {
             WindowEvent::CloseRequested => self.real(Input::Close),
-            WindowEvent::Focused(f) => self.real(Input::Focus(f)),
+            WindowEvent::Focused(f) => {
+                self.focused = f;
+                self.catch_cursor();
+                self.real(Input::Focus(f));
+            }
             WindowEvent::Resized(_) => self.keep_fullscreen(),
             // moved to another display while fullscreen: fill that one
             WindowEvent::Moved(_) => self.keep_fullscreen(),
@@ -508,6 +569,8 @@ impl ApplicationHandler for App {
                     MouseButton::Left => 0,
                     MouseButton::Right => 1,
                     MouseButton::Middle => 2,
+                    MouseButton::Back => 3,
+                    MouseButton::Forward => 4,
                     _ => return,
                 };
                 self.real(Input::Button(b, state == ElementState::Pressed));
@@ -540,6 +603,17 @@ impl ApplicationHandler for App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Raw mouse movement (Windows' raw input, while the window has the focus): DirectInput's
+    /// x and y.
+    fn device_event(&mut self, _: &ActiveEventLoop, _: DeviceId, e: DeviceEvent) {
+        if let DeviceEvent::MouseMotion { delta: (x, y) } = e {
+            let (x, y) = (x.round() as i32, y.round() as i32);
+            if self.focused && (x, y) != (0, 0) {
+                self.real(Input::Motion(x, y));
+            }
         }
     }
 }

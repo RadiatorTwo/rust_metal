@@ -9,6 +9,7 @@ fn scripted_runs_ignore_real_keyboard_and_mouse() {
         Input::Key { vk: 0x0d, scan: 0x1c, down: true, repeat: false },
         Input::Char(b'a'),
         Input::Move(10, 20),
+        Input::Motion(3, -4),
         Input::Button(0, true),
         Input::Wheel(1),
     ];

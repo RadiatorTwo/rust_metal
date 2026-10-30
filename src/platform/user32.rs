@@ -77,6 +77,10 @@ struct State {
     /// keys down by DIK code (scan code, bit 7 extended), for DirectInput
     dik: [bool; 256],
     mouse: (i32, i32),
+    /// a move has set `mouse` (a script's first move is no movement)
+    moved: bool,
+    /// the mouse's movement and wheel since DirectInput last read them (`take_motion`)
+    motion: (i32, i32, i32),
     /// hooks: id, kind, procedure
     hooks: Vec<(u32, u32, u32)>,
 }
@@ -92,6 +96,8 @@ static STATE: Mutex<State> = Mutex::new(State {
     keys: [0; 256],
     dik: [false; 256],
     mouse: (0, 0),
+    moved: false,
+    motion: (0, 0, 0),
     hooks: Vec::new(),
 });
 
@@ -132,7 +138,24 @@ fn key_state(s: &mut State, vk: u8, scan: u8, down: bool) {
     } else {
         *k &= !0x80;
     }
-    s.dik[scan as usize] = down;
+    if s.dik[scan as usize] != down {
+        s.dik[scan as usize] = down;
+        super::dinput::key_event(scan, down);
+    }
+}
+
+/// The mouse's movement (raw, in mickeys) and wheel (120 per notch, positive away from the
+/// user) since the last call, for DirectInput.
+pub fn take_motion() -> (i32, i32, i32) {
+    std::mem::take(&mut st().motion)
+}
+
+/// One input event as `poll` takes it from the window (for tests): `scripted` as in a
+/// `GUNMETAL_INPUT` run.
+pub fn feed(i: Input, scripted: bool) {
+    let mut s = st();
+    let hwnd = s.main;
+    handle(&mut s, hwnd, i, scripted);
 }
 
 /// The key state of a key event without its message (for tests).
@@ -167,53 +190,9 @@ fn poll(wait: Duration) {
     let mut guard = st();
     let s = &mut *guard;
     let hwnd = s.main;
+    let scripted = window::scripted_run();
     while let Some(i) = window::next_input() {
-        let m = |msg, wp, lp| Msg { hwnd, msg, wp, lp };
-        match i {
-            Input::Key { vk, scan, down, repeat } => {
-                key_state(s, vk, scan, down);
-                let lp = 1 | (scan as u32 & 0x7f) << 16 | (scan as u32 >> 7) << 24 | if repeat { 1 << 30 } else { 0 } | if down { 0 } else { 3 << 30 };
-                let sys = vk == 0x12 || key_alt(&s.keys) && vk != 0x12;
-                let msg = match (down, sys) {
-                    (true, false) => WM_KEYDOWN,
-                    (false, false) => WM_KEYUP,
-                    (true, true) => WM_SYSKEYDOWN,
-                    (false, true) => WM_SYSKEYUP,
-                };
-                s.queue.push_back(m(msg, vk as u32, lp));
-            }
-            Input::Char(ch) => s.queue.push_back(m(WM_CHAR, ch as u32, 1)),
-            Input::Move(x, y) => {
-                s.mouse = (x, y);
-                s.queue.push_back(m(WM_MOUSEMOVE, buttons(&s.keys), (x as u32 & 0xffff) | (y as u32) << 16));
-            }
-            Input::Button(b, down) => {
-                let vk = [1u8, 2, 4][b as usize];
-                let k = &mut s.keys[vk as usize];
-                *k = if down { 0x81 } else { *k & !0x80 };
-                let msg = [0x201, 0x204, 0x207][b as usize] + if down { 0 } else { 1 };
-                let (x, y) = s.mouse;
-                s.queue.push_back(m(msg, buttons(&s.keys), (x as u32 & 0xffff) | (y as u32) << 16));
-            }
-            Input::Wheel(n) => {
-                let (x, y) = s.mouse;
-                s.queue.push_back(m(WM_MOUSEWHEEL, buttons(&s.keys) | ((n * 120) as u32) << 16, (x as u32 & 0xffff) | (y as u32) << 16));
-            }
-            Input::Close => s.queue.push_back(m(WM_CLOSE, 0, 0)),
-            // The game pauses itself when it is deactivated (WM_ACTIVATEAPP 0), as Windows 98
-            // games did; here it keeps running in the background. Keys held when the window
-            // loses the focus would never see their release: they are let go.
-            Input::Focus(false) => {
-                s.dik = [false; 256];
-                for vk in 0..256 {
-                    if s.keys[vk] & 0x80 != 0 {
-                        s.keys[vk] &= !0x80;
-                        s.queue.push_back(m(WM_KEYUP, vk as u32, 0xc000_0001));
-                    }
-                }
-            }
-            Input::Focus(true) | Input::Poke(..) => {}
-        }
+        handle(s, hwnd, i, scripted);
     }
     let now = super::kernel32::ms_since_start();
     let mut due = Vec::new();
@@ -231,13 +210,76 @@ fn poll(wait: Duration) {
     }
 }
 
+/// One input event: key state and messages, the mouse's position and movement.
+fn handle(s: &mut State, hwnd: u32, i: Input, scripted: bool) {
+    let m = |msg, wp, lp| Msg { hwnd, msg, wp, lp };
+    match i {
+        Input::Key { vk, scan, down, repeat } => {
+            key_state(s, vk, scan, down);
+            let lp = 1 | (scan as u32 & 0x7f) << 16 | (scan as u32 >> 7) << 24 | if repeat { 1 << 30 } else { 0 } | if down { 0 } else { 3 << 30 };
+            let sys = vk == 0x12 || key_alt(&s.keys) && vk != 0x12;
+            let msg = match (down, sys) {
+                (true, false) => WM_KEYDOWN,
+                (false, false) => WM_KEYUP,
+                (true, true) => WM_SYSKEYDOWN,
+                (false, true) => WM_SYSKEYUP,
+            };
+            s.queue.push_back(m(msg, vk as u32, lp));
+        }
+        Input::Char(ch) => s.queue.push_back(m(WM_CHAR, ch as u32, 1)),
+        Input::Move(x, y) => {
+            // a script has no raw movement: its moves are the mouse's movement
+            if scripted && s.moved {
+                s.motion.0 += x - s.mouse.0;
+                s.motion.1 += y - s.mouse.1;
+            }
+            s.moved = true;
+            s.mouse = (x, y);
+            s.queue.push_back(m(WM_MOUSEMOVE, buttons(&s.keys), (x as u32 & 0xffff) | (y as u32) << 16));
+        }
+        Input::Motion(dx, dy) => {
+            s.motion.0 += dx;
+            s.motion.1 += dy;
+        }
+        Input::Button(b, down) => {
+            let Some(&vk) = [1u8, 2, 4, 5, 6].get(b as usize) else { return };
+            let k = &mut s.keys[vk as usize];
+            *k = if down { 0x81 } else { *k & !0x80 };
+            // WM_LBUTTON*, WM_RBUTTON*, WM_MBUTTON*, WM_XBUTTON* (XBUTTON1 or 2 in the high word)
+            let (msg, x) = if b < 3 { ([0x201, 0x204, 0x207][b as usize], 0) } else { (0x20b, (b as u32 - 2) << 16) };
+            let (px, py) = s.mouse;
+            s.queue.push_back(m(msg + if down { 0 } else { 1 }, buttons(&s.keys) | x, (px as u32 & 0xffff) | (py as u32) << 16));
+        }
+        Input::Wheel(n) => {
+            s.motion.2 += n * 120;
+            let (x, y) = s.mouse;
+            s.queue.push_back(m(WM_MOUSEWHEEL, buttons(&s.keys) | ((n * 120) as u32) << 16, (x as u32 & 0xffff) | (y as u32) << 16));
+        }
+        Input::Close => s.queue.push_back(m(WM_CLOSE, 0, 0)),
+        // The game pauses itself when it is deactivated (WM_ACTIVATEAPP 0), as Windows 98
+        // games did; here it keeps running in the background. Keys held when the window
+        // loses the focus would never see their release: they are let go.
+        Input::Focus(false) => {
+            s.dik = [false; 256];
+            s.motion = (0, 0, 0);
+            for vk in 0..256 {
+                if s.keys[vk] & 0x80 != 0 {
+                    s.keys[vk] &= !0x80;
+                    s.queue.push_back(m(WM_KEYUP, vk as u32, 0xc000_0001));
+                }
+            }
+        }
+        Input::Focus(true) | Input::Poke(..) => {}
+    }
+}
+
 fn key_alt(keys: &[u8; 256]) -> bool {
     keys[0x12] & 0x80 != 0
 }
 
 /// MK_* flags for mouse messages
 fn buttons(keys: &[u8; 256]) -> u32 {
-    (keys[1] >> 7) as u32 | ((keys[2] >> 7) as u32) << 1 | ((keys[0x10] >> 7) as u32) << 2 | ((keys[0x11] >> 7) as u32) << 3 | ((keys[4] >> 7) as u32) << 4
+    (keys[1] >> 7) as u32 | ((keys[2] >> 7) as u32) << 1 | ((keys[0x10] >> 7) as u32) << 2 | ((keys[0x11] >> 7) as u32) << 3 | ((keys[4] >> 7) as u32) << 4 | ((keys[5] >> 7) as u32) << 5 | ((keys[6] >> 7) as u32) << 6
 }
 
 /// The next message for this thread, waiting up to `wait` for one (modal loops).

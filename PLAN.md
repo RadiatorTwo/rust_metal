@@ -127,8 +127,14 @@ Updated 2026-10-30. Details on how things work: CLAUDE.md. Design:
       menu background's scrolling text shows faintly beside the 4:3 middle; the radar is
       wider than round (it follows the screen's width); our own resolution setting (the
       game's needs its menu, which takes keys only in parts)
-- [ ] DirectInput: buffered keyboard data (GetDeviceData; the game uses it for short presses),
-      joysticks (gamepads), the exclusive mouse's relative movement at the window's edge
+- [x] Input (Task 10, `dinput.rs`, `window.rs`): buffered keyboard data (GetDeviceData: taps
+      between two reads), the mouse from raw motion (no stop at the edge), wheel and 5
+      buttons, the cursor hidden and confined while the exclusive mouse is acquired and the
+      window has the focus. To be confirmed by hand: menus with keys and mouse, quick taps,
+      a changed key binding kept after a restart, aiming past the edge, Alt+Tab frees the
+      cursor
+- [ ] Joysticks/gamepads: the game enumerates DIDEVTYPE_JOYSTICK (joy_enum 0x4dd6f0) and
+      goes on without; needs a joystick device (DIJOYSTATE, objects, ranges; gilrs)
 - [x] Music (Task 9): a graph given a sound file plays it (`dshow.rs`, `music.rs`, `mf.rs`:
       Media Foundation decodes the WMA, waveOut plays it, put_Volume scales it, EC_COMPLETE
       at the end, the game loops it); tests `tests/mf.rs`. To be confirmed by ear: front-end

@@ -82,12 +82,17 @@ gives its HWND for Direct3D 9; it does not follow the game's SetWindowPos or WS_
 (`place` only sets the size input positions are scaled to): it is a framed window that a
 device's back buffer size fits (`set_game_size`, centred), or borderless fullscreen;
 Alt+Enter switches, `display.rs` keeps the choice, fullscreen by default; ShowCursor hides
-the cursor over it), `gdi32.rs` (a stock brush), `advapi32.rs` (registry in
+the cursor over it; an acquired exclusive DirectInput mouse hides and confines it while the
+window has the focus, `catch_mouse`, not in scripted runs; raw mouse motion is
+`Input::Motion`), `gdi32.rs` (a stock brush), `advapi32.rs` (registry in
 `registry.txt`), `winmm.rs` (clock, timeSetEvent threads), `ole32.rs` (CoCreateInstance by
 CLSID: built-in DirectInput, filter graph and VMR9, and `ole32::register_class(clsid, create)`
 for later modules; an unknown CLSID gives REGDB_E_CLASSNOTREG and a log line), `dinput.rs`
-(DirectInput 7 from rustschweine: keyboard and mouse by state from the window's input, no
-buffered data yet, no joysticks yet), `dshow.rs` (our own DirectShow filter graph and VMR9:
+(DirectInput 7 from rustschweine: keyboard by state and buffered events (GetDeviceData,
+DIPROP_BUFFERSIZE, DIGDD_PEEK, DI_BUFFEROVERFLOW; 16-byte DIDEVICEOBJECTDATA), mouse by state
+from raw motion (`user32::take_motion`, wheel 120 per notch, 5 buttons); devices track
+Acquire (GetDeviceState/GetDeviceData unacquired: DIERR_NOTACQUIRED, the game re-Acquires);
+no joysticks: the game enumerates them and goes on without), `dshow.rs` (our own DirectShow filter graph and VMR9:
 videos are skipped, Run posts EC_COMPLETE and the position is the end, 0; a sound file
 (RenderFile: data\music\*.wma, by the game's music object, music_* in symbols.txt) gets a
 player, `music.rs`: a host thread decodes it with `mf.rs` (Media Foundation's IMFSourceReader to
@@ -183,7 +188,14 @@ How the game starts (`GUNMETAL_TRACE_API=1` shows every import call):
    two devices; primary 44100 Hz 16-bit stereo, a looping 1 s buffer, the samples). input_init (0x4ddcc0): DirectInput 7 three times through CoCreateInstance
    (CLSID_DirectInput, IID_IDirectInput7W, then QueryInterface IID_IDirectInput7A,
    Initialize 0x700; di_create 0x4dded0) for the keyboard, the mouse and the joysticks (none:
-   "Joystick/joypad not found" in gunmetal.log, which is fine). Then the videos
+   "Joystick/joypad not found" in gunmetal.log, which is fine). How the game reads them
+   (`dinput.rs` module doc): keyboard non-exclusive, by state (kb_read 0x4dced0) and, for a
+   key not down, the buffered presses since the last read (kb_key_down 0x4dcdc0,
+   kb_buffered 0x4dcce0); mouse exclusive | foreground by state (mouse_read 0x4dd0d0; game_start
+   unacquires it, the first read re-acquires it), driving the game's own menu cursor and the
+   aim (mouse_update 0x4477d0); key bindings (bind_capture 0x4ed4f0) take keys, mouse buttons
+   0-6 and the wheel; the bindings file is data\KeyAssignments.txt (missing: defaults). The
+   game reads no window messages for input. Then the videos
    (video_start 0x4174a0; `dshow.rs` has the details): Extras/VideoMethod is 1, so the
    videotexture player (filter graph, AddSourceFilter, the game's own "TEXTURERENDERER"
    filter, IMediaEvent) plays "cgplayed_01_h.wmv", "intro1_ps_h.wmv", "intro2_ps_h.wmv", each
@@ -202,8 +214,9 @@ How the game starts (`GUNMETAL_TRACE_API=1` shows every import call):
    save slot 0, delete it afterwards): `GUNMETAL_INPUT="16000:Enter 19000:Up 20000:Enter 24000:Enter
    28000:Enter 32000:Enter 36000:Enter 40000:Enter 44000:Enter 48000:Enter 50000:move@512,384"` (title, Up to
    "Neues Spiel", slot, pilot ID OK, "Einsatz wählen", mission, arsenal "Starten", briefing
-   "BEREIT"; the mission runs from ~52 s). The mouse move before the mission avoids a big first mouse delta
-   (DirectInput movement comes from cursor positions). In the mission W walks, a held left
+   "BEREIT"; the mission runs from ~52 s). In scripted runs DirectInput's mouse
+   movement is the script's moves (the first one a starting point); in real runs it is raw
+   mouse motion. In the mission W walks, a held left
    button fires, mouse movement aims.
    The menu's drawing: fixed function only (SetVertexShader(null)/SetPixelShader(null)); FVFs
    0x102 (XYZ|TEX1), 0x142 (XYZ|DIFFUSE|TEX1), 0x112 (XYZ|NORMAL|TEX1), 0x42 (XYZ|DIFFUSE),

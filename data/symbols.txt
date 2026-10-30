@@ -106,7 +106,7 @@
 0x4dded0 di_create            as DirectInputCreateEx: CoCreateInstance(CLSID_DirectInput, IID_IDirectInput7W), QueryInterface(riid: IID_IDirectInput7A), Release, Initialize(instance, version)
 0x4dcba0 kb_init              di_create (0x700) unless given one, CreateDeviceEx(GUID_SysKeyboard), SetDataFormat(c_dfDIKeyboard 0x5edef8), SetCooperativeLevel(hwnd, non-exclusive | foreground | no Windows key), kb_set_buffer
 0x4dcc60 kb_set_buffer        SetProperty(DIPROP_BUFFERSIZE, n) and a buffer of n DIDEVICEOBJECTDATA (0x726b00)
-0x4dcce0 kb_buffered          GetDeviceData into the buffer (re-Acquire on loss): keys pressed since the last read marked down in a state copy
+0x4dcce0 kb_buffered          GetDeviceData(16, buffer, count, 0) into the buffer (DI_BUFFEROVERFLOW is success, other errors re-Acquire): keys pressed (dwData bit 7) since the last read marked down in a state copy
 0x4dcdc0 kb_key_down          (dik, read now) GetDeviceState(256) into 0x726a00; a key not down now: kb_buffered
 0x4dce70 kb_acquire
 0x4dcea0 kb_unacquire
@@ -114,10 +114,12 @@
 0x4dcf40 kb_release
 0x4dcfa0 key_by_name?         (name, out) a key's code from the table of 0x6d (name, code) pairs at 0x6330d0
 0x4dd010 mouse_init           di_create, CreateDeviceEx(GUID_SysMouse), SetDataFormat(c_dfDIMouse2 0x5edf10), SetCooperativeLevel(hwnd, exclusive | foreground)
-0x4dd0d0 mouse_read           GetDeviceState(20) into 0x726b14, re-Acquire up to 10 times (cleared on failure)
+0x4dd0d0 mouse_read           GetDeviceState(20) into 0x726b14, re-Acquire up to 10 times (cleared on failure); game_start unacquires the mouse (0x45a0a0), so the first read acquires it
 0x4dd150 mouse_acquire
 0x4dd180 mouse_unacquire
 0x4dd1b0 mouse_release
+0x4477d0 mouse_update         mouse_read; x and y times a sensitivity (table of 11) added to the cursor at 0x661d1c/0x661d20, kept within half the screen; buttons 0-5 to 0x661d24, the wheel (lZ) as two more
+0x4ed4f0 bind_capture         the key binding menu's next input: kb_read (Escape ends), any key, mouse buttons 0-6 (codes 0x11d, 0x11e, 0x118, 0x13a-0x13d), the wheel (0x138/0x139), joysticks (0x4dda60)
 0x4dd6f0 joy_enum             di_create, EnumDevices(DIDEVTYPE_JOYSTICK, joy_enum_cb, attached only); per joystick found: CreateDeviceEx, c_dfDIJoystick2?, EnumObjects(joy_axis_cb)
 0x4dd600 joy_enum_cb?         EnumDevices callback: counts and names joysticks (count at +0x890 of the list)
 0x4dd200 joy_axis_cb?         EnumObjects callback: SetProperty(DIPROP_RANGE, -500..500) per axis
