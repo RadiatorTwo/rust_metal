@@ -91,9 +91,11 @@ buffered data yet, no joysticks yet), `dshow.rs` (our own DirectShow filter grap
 videos are skipped, Run posts EC_COMPLETE and the position is the end, 0; a sound file
 (RenderFile: data\music\*.wma, by the game's music object, music_* in symbols.txt) gets a
 player, `music.rs`: a host thread decodes it with `mf.rs` (Media Foundation's IMFSourceReader to
-16-bit PCM; MFStartup once; `mf::available` asks for a WMA decoder, `GUNMETAL_NO_MF=1` says
+16-bit PCM; mfplat.dll and mfreadwrite.dll loaded at run time, not imported, so the exe
+starts on Windows N without them; MFStartup once; `mf::available` asks for a WMA decoder, `GUNMETAL_NO_MF=1` says
 no: "no Media Foundation WMA decoder: music off" and the music is silent, ended at once) and
-plays it through waveOut, put_Volume scaling the samples; at the end of the file EC_COMPLETE
+plays it through waveOut, put_Volume scaling the samples (a file or device that does not open:
+no player, silent); at the end of the file EC_COMPLETE
 through the graph's event (set by `kernel32::set_event_state` from the host thread), and the
 game loops by SetPositions(0)), `dsound.rs` (DirectSound 8 passed through to the system's dsound.dll as `d3d9/` is:
 IDirectSound8, IDirectSoundBuffer8, IDirectSound3DBuffer/Listener, IDirectSoundNotify as guest

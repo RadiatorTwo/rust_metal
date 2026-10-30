@@ -57,17 +57,26 @@ pub struct Player {
 
 impl Player {
     /// Start the thread for `path` (stopped at the start); `event`: the graph's guest event
-    /// handle if it has one already.
-    pub fn open(path: PathBuf, event: u32, volume: i32) -> Player {
+    /// handle if it has one already. Waits until the thread has opened the file and the sound
+    /// device: None (logged) when either fails, and the graph treats the file as silent.
+    pub fn open(path: PathBuf, event: u32, volume: i32) -> Option<Player> {
         let shared = Arc::new(Shared::default());
         {
             let mut s = lock(&shared.state);
             s.event = event;
             s.volume = volume;
         }
-        let sh = shared.clone();
-        let thread = std::thread::Builder::new().name("music".into()).spawn(move || play(&path, &sh)).ok();
-        Player { shared, thread }
+        let (sh, (ready, opened)) = (shared.clone(), std::sync::mpsc::channel());
+        let thread = std::thread::Builder::new().name("music".into()).spawn(move || play(&path, &sh, ready)).ok()?;
+        match opened.recv() {
+            Ok(Ok(())) => Some(Player { shared, thread: Some(thread) }),
+            Ok(Err(e)) => {
+                log!("warn: music: {e}");
+                let _ = thread.join();
+                None
+            }
+            Err(_) => None,
+        }
     }
 
     fn change(&self, f: impl FnOnce(&mut State)) {
@@ -143,73 +152,67 @@ pub fn gain(volume: i32) -> f32 {
     if volume <= -10000 { 0.0 } else { 10f32.powf(volume.min(0) as f32 / 2000.0) }
 }
 
-/// The player thread: decode and queue while running, until `quit`.
-fn play(path: &Path, shared: &Shared) {
-    let mut media = match mf::Reader::open(path).and_then(|r| Output::open(r.rate, r.channels).map(|o| (r, o))) {
-        Ok((r, o)) => {
-            log!("music: {}: {} Hz, {} channels, {:.1} s", path.display(), r.rate, r.channels, r.duration as f64 / 1e7);
-            lock(&shared.state).duration = r.duration;
-            Some((r, o))
-        }
+/// The player thread: open the file and the device (the result goes to `ready`), then decode
+/// and queue while running, until `quit`.
+fn play(path: &Path, shared: &Shared, ready: std::sync::mpsc::Sender<Result<(), String>>) {
+    let (mut r, mut o) = match mf::Reader::open(path).and_then(|r| Output::open(r.rate, r.channels).map(|o| (r, o))) {
+        Ok(m) => m,
         Err(e) => {
-            log!("warn: music: {e} (silent)");
-            None
+            let _ = ready.send(Err(e));
+            return;
         }
     };
+    log!("music: {}: {} Hz, {} channels, {:.1} s", path.display(), r.rate, r.channels, r.duration as f64 / 1e7);
+    lock(&shared.state).duration = r.duration;
+    let _ = ready.send(Ok(()));
     let mut pending: Vec<i16> = Vec::new();
-    let (mut at_end, mut base, mut played) = (false, 0u64, 0u64);
+    let (mut at_end, mut base) = (false, 0u64);
+    // A play-through that queued nothing (a decoding error at once, an empty file) posts
+    // EC_COMPLETE only the first time: the game seeks to 0 at every EC_COMPLETE and would
+    // otherwise be woken 100 times a second.
+    let (mut queued_any, mut posted_empty) = (false, false);
     let mut s = lock(&shared.state);
     while !s.quit {
         let (running, g) = (s.running, gain(s.volume));
         if let Some(t) = s.seek.take() {
-            if let Some((r, o)) = &mut media {
-                o.reset();
-                if let Err(e) = r.seek(t) {
-                    log!("warn: music: {}: {e}", path.display());
-                }
+            o.reset();
+            if let Err(e) = r.seek(t) {
+                log!("warn: music: {}: {e}", path.display());
             }
             pending.clear();
-            (at_end, base, played) = (false, t, 0);
+            (at_end, base, queued_any) = (false, t, false);
         }
         // decoding and queueing without the lock: the game's calls do not wait for it
         drop(s);
-        let idle = match &mut media {
-            Some((r, o)) => {
-                o.set_paused(!running);
-                if running {
-                    while !at_end && let Some(k) = o.free_block() {
-                        let want = o.block_frames * r.channels as usize;
-                        while pending.len() < want && !at_end {
-                            match r.read(&mut pending) {
-                                Ok(more) => at_end = !more,
-                                Err(e) => {
-                                    log!("warn: music: {}: {e}", path.display());
-                                    at_end = true;
-                                }
-                            }
+        o.set_paused(!running);
+        if running {
+            while !at_end && let Some(k) = o.free_block() {
+                let want = o.block_frames * r.channels as usize;
+                while pending.len() < want && !at_end {
+                    match r.read(&mut pending) {
+                        Ok(more) => at_end = !more,
+                        Err(e) => {
+                            log!("warn: music: {}: {e}", path.display());
+                            at_end = true;
                         }
-                        let n = want.min(pending.len());
-                        if n == 0 {
-                            break;
-                        }
-                        o.queue(k, pending.drain(..n), g);
                     }
                 }
-                played = o.played_frames();
-                o.idle()
+                let n = want.min(pending.len());
+                if n == 0 {
+                    break;
+                }
+                o.queue(k, pending.drain(..n), g);
+                queued_any = true;
             }
-            None => {
-                at_end = true;
-                true
-            }
-        };
+        }
+        let played = o.played_frames();
+        let idle = o.idle();
         s = lock(&shared.state);
-        if let Some((r, _)) = &media
-            && s.seek.is_none()
-        {
+        if s.seek.is_none() {
             s.position = base + played * 10_000_000 / r.rate as u64;
         }
-        if running && at_end && idle && !s.ended && !s.complete && s.seek.is_none() {
+        if running && at_end && idle && !s.ended && !s.complete && s.seek.is_none() && (queued_any || !posted_empty) {
+            posted_empty |= !queued_any;
             s.complete = true;
             if s.event != 0 {
                 kernel32::set_event_state(s.event, true);
@@ -317,9 +320,16 @@ impl Output {
         }
     }
 
-    /// Drop what is queued; the count of played frames starts again.
+    /// Drop what is queued; the count of played frames starts again. A paused device stays
+    /// paused (whether waveOutReset keeps the pause is not documented; pausing again is
+    /// harmless), so `paused` matches the device and the next Run restarts it.
     fn reset(&mut self) {
-        unsafe { waveOutReset(self.h) };
+        unsafe {
+            waveOutReset(self.h);
+            if self.paused {
+                waveOutPause(self.h);
+            }
+        }
         self.collect();
         self.done_frames = 0;
     }

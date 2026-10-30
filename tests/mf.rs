@@ -63,7 +63,8 @@ fn gain_from_hundredths_of_db() {
 }
 
 /// The music player: Run plays to the end, EC_COMPLETE waits and sets the graph's event; a
-/// seek to 0 plays it again (the game's loop). Without a sound device the file ends at once.
+/// seek to 0 plays it again (the game's loop), also a seek while paused. Skips without a sound
+/// device (no player is made then).
 #[test]
 fn player_ends_and_loops() {
     use rust_metal::platform::dshow::Events;
@@ -73,7 +74,11 @@ fn player_ends_and_loops() {
     let path = std::env::temp_dir().join(format!("rust_metal_player_{}.wav", std::process::id()));
     std::fs::write(&path, wav(8000, 1, &ramp)).unwrap();
     let h = Events::default().handle();
-    let p = Player::open(path.clone(), h, -600);
+    let Some(p) = Player::open(path.clone(), h, -600) else {
+        std::fs::remove_file(&path).ok();
+        eprintln!("skipped: no sound device");
+        return;
+    };
     let ends = |p: &Player| {
         let t = std::time::Instant::now();
         while kernel32::wait(&[h], false, 0) != 0 {
@@ -93,6 +98,24 @@ fn player_ends_and_loops() {
     p.seek(0);
     assert!(!p.ended());
     ends(&p);
+    // paused, a seek resets the device; the next Run must still play to the end
+    p.seek(0);
+    p.run();
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    p.pause();
+    p.seek(0);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(kernel32::wait(&[h], false, 0), 0x102, "paused: no EC_COMPLETE");
+    p.run();
+    ends(&p);
     drop(p);
     std::fs::remove_file(&path).ok();
+}
+
+/// A file that does not open gives no player: the graph keeps it silent, ended at once (one
+/// EC_COMPLETE), instead of a player that would end again after every seek.
+#[test]
+fn no_player_for_a_missing_file() {
+    use rust_metal::platform::music::Player;
+    assert!(Player::open("nope.wma".into(), 0, 0).is_none());
 }

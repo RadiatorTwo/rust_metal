@@ -176,10 +176,14 @@ pub fn is_audio(path: &str) -> bool {
     [".wma", ".wav", ".mp3"].iter().any(|e| p.ends_with(e))
 }
 
-/// A player for the sound file `path` (a guest path), if music can be played.
+/// A player for the sound file `path` (a guest path), if music can be played and the file and
+/// a sound device open.
 #[cfg(windows)]
 fn open_music(path: &str, event: u32, volume: i32) -> Option<Player> {
-    super::mf::available().then(|| Player::open(super::host_path(path), event, volume))
+    if !super::mf::available() {
+        return None;
+    }
+    Player::open(super::host_path(path), event, volume)
 }
 
 #[cfg(not(windows))]
