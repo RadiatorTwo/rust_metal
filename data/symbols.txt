@@ -155,6 +155,17 @@
 0x586b50 texture_renderer_ctor  the game's DirectShow renderer (base classes CBaseRenderer, 0x5c69a0), "TEXTURERENDERER", texture at +0x16c
 0x586ae0 volume_to_db         0..1 to hundredths of dB (-10000 at 0)
 
+# DirectSound 8 (dsound.rs): two sound objects (two DirectSound devices) are made at start-up
+0x465130 sound_init           thiscall: DirectSoundCreate8 (default device) -> +0x48, sound_get_caps, SetCooperativeLevel(window 0x76d510, PRIORITY), primary buffer (PRIMARYBUFFER|CTRL3D) -> +0x4c, SetFormat 44100 Hz (16 or 8 bits, stereo or mono by +0x58), its IDirectSound3DListener -> +0x50, listener defaults, Play(LOOPING), sound_keep_alive
+0x465490 sound_get_caps       thiscall: IDirectSound8::GetCaps
+0x465550 sound_load_sample    thiscall: a secondary buffer per sample (flags 0xa8: LOCSOFTWARE|CTRLFREQUENCY|CTRLVOLUME, 22050 Hz 16-bit mono in the front end), filled once with Lock(ENTIREBUFFER)/Unlock
+0x465bc0 sound_new_voice      thiscall(sample): DuplicateSoundBuffer of the sample's buffer, for 3D samples its IDirectSound3DBuffer (QueryInterface 0x5eddd8)
+0x466f30 sound_listener_commit thiscall: IDirectSound3DListener::CommitDeferredSettings, every frame
+0x4672a0 sound_keep_alive     thiscall: a 1 s buffer (176400 bytes, the primary's format) filled once and played looping
+0x4688d0 stream_open          thiscall: a streamed buffer of 3 x 0x2000 bytes (flags 0x10180: GETCURRENTPOSITION2|CTRLPOSITIONNOTIFY|CTRLVOLUME), its IDirectSoundNotify (0x5eddc8) -> +0x128, stream_set_notify, two chunks filled, Play(LOOPING)
+0x468580 stream_set_notify    thiscall: SetNotificationPositions at 0x1fff, 0x3fff, 0x5fff, all on the event +0x130 (CreateEventA manual reset, 0x468c20)
+0x469300 stream_thread        thiscall: WaitForMultipleObjects on its stop event and the stream's events, the callback (+0x3c) refills the third that has played
+
 # Start-up data
 0x664738 d3d_result           what d3d_create returned (game_start skips to an error message for 1 and 2)
 0x675390 d3d9                 the IDirect3D9

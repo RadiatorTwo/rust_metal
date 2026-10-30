@@ -14,6 +14,7 @@ pub mod d3d9;
 pub mod dinput;
 pub mod display;
 pub mod dshow;
+#[cfg(windows)]
 pub mod dsound;
 pub mod fps;
 pub mod gdi32;
@@ -772,6 +773,7 @@ fn find_import(dll: &str, name: &str) -> Option<&'static Import> {
         "ADVAPI32.DLL" => advapi32::IMPORTS,
         "WINMM.DLL" => winmm::IMPORTS,
         "OLE32.DLL" => ole32::IMPORTS,
+        #[cfg(windows)]
         "DSOUND.DLL" => dsound::IMPORTS,
         #[cfg(windows)]
         "D3D9.DLL" => d3d9::IMPORTS,

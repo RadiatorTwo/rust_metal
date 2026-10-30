@@ -89,7 +89,12 @@ for later modules; an unknown CLSID gives REGDB_E_CLASSNOTREG and a log line), `
 (DirectInput 7 from rustschweine: keyboard and mouse by state from the window's input, no
 buffered data yet, no joysticks yet), `dshow.rs` (our own DirectShow filter graph and VMR9:
 videos and sound files are skipped, Run posts EC_COMPLETE and the position is the end, 0; the
-graph is the object later tasks play music through), `dsound.rs` (DirectSoundCreate8 says no device),
+graph is the object later tasks play music through), `dsound.rs` (DirectSound 8 passed through to the system's dsound.dll as `d3d9/` is:
+IDirectSound8, IDirectSoundBuffer8, IDirectSound3DBuffer/Listener, IDirectSoundNotify as guest
+COM objects; DSBUFFERDESC's format pointer points at the game's WAVEFORMATEX in place; Lock gives
+parts in a guest shadow of the whole buffer, first part at the lock's offset, a wrapped second
+at its start, the host's bytes copied in, the game's out at Unlock; SetNotificationPositions
+maps each guest event to a host event whose thread sets the guest one, `host_event`),
 `d3d9/` (Direct3D 9 passed through to the system's d3d9.dll, see below), `crt.rs` (`__ftol`
 hooked; the game's warning report 0x557f40 goes to our log as "game: ..."),
 `sample.rs` (`GUNMETAL_SAMPLE=1` profiler), `video.rs` (the Video menu offers every display mode, not
@@ -166,8 +171,8 @@ How the game starts (`GUNMETAL_TRACE_API=1` shows every import call):
    (the mode comes from data\persist.dat's defaults; the desktop size does not change it).
    Then render states, a vertex and an index buffer (dynamic, write-only), CreateQuery(event)
    as a support test, textures (DXT3 4x4 and 64x64 managed, A8R8G8B8 2048x2048 system memory,
-   loaded through GetSurfaceLevel and LockRect), DirectSoundCreate8 (no device: the game goes
-   on). input_init (0x4ddcc0): DirectInput 7 three times through CoCreateInstance
+   loaded through GetSurfaceLevel and LockRect), DirectSound (sound_init 0x465130, twice:
+   two devices; primary 44100 Hz 16-bit stereo, a looping 1 s buffer, the samples). input_init (0x4ddcc0): DirectInput 7 three times through CoCreateInstance
    (CLSID_DirectInput, IID_IDirectInput7W, then QueryInterface IID_IDirectInput7A,
    Initialize 0x700; di_create 0x4dded0) for the keyboard, the mouse and the joysticks (none:
    "Joystick/joypad not found" in gunmetal.log, which is fine). Then the videos

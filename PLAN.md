@@ -68,6 +68,15 @@ Updated 2026-10-30. Details on how things work: CLAUDE.md. Design:
       switches, saved in `registry.txt`, fullscreen by default (test `tests/picture.rs`).
       Seen: front end in both
 
+- [x] DirectSound 8 passed through to the system's dsound.dll (Task 8, `dsound.rs`):
+      IDirectSound8, IDirectSoundBuffer8, IDirectSound3DBuffer, IDirectSound3DListener,
+      IDirectSoundNotify; locks through a guest shadow of the whole buffer (same split as the
+      host's); notification events forwarded from host events to the game's guest events
+      (tests `tests/dsound_types.rs`). Seen: to the title screen every DirectSound call
+      succeeds (two devices, primary 44100 Hz 16-bit stereo, the front end's samples loaded
+      and played). Listening is the user's. GetLocalTime is local time now (save slot times
+      were UTC; `tests/kernel32_time.rs`)
+
 ## Open
 
 - [ ] Frame rate (milestone 2). Findings 2026-10-30 (`src/platform/fps.rs`): missions are
@@ -123,7 +132,6 @@ Updated 2026-10-30. Details on how things work: CLAUDE.md. Design:
 - [ ] Videos (`.wmv`) and music: the graph skips them now (`dshow.rs`)
 - [ ] Direct3D 9 still open: volume textures, swap chains, GetDC, GetAdapterMonitor (none
       called by the front end)
-- [ ] DirectSound (`dsound.rs`: DirectSoundCreate8 says "no device" now)
 - [ ] Imports bound to "not implemented" (stop when called): CreateProcessA,
       EnumSystemLocalesA, CreateFileW, CreateFileMappingA, MapViewOfFile, UnmapViewOfFile
 - [ ] MMX/3DNow!/SSE in the lifter: not needed while CPUID hides them

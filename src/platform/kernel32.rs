@@ -663,6 +663,11 @@ pub fn set_event_state(h: u32, on: bool) -> u32 {
         _ => 0,
     }
 }
+/// Whether `h` is an event (not closed).
+pub fn is_event(h: u32) -> bool {
+    matches!(objects().map.get(&h), Some(Obj::Event { .. }))
+}
+
 fn set_event(c: &mut Cpu) -> u32 {
     set_event_state(arg(c, 0), true)
 }
