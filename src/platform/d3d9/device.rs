@@ -113,7 +113,43 @@ fn present(c: &mut Cpu) -> u32 {
     let target = if w == 0 { super::host_hwnd(crate::platform::user32::main_window()) } else { win };
     let dest = if arg(c, 2) == 0 { super::letterbox(target) } else { None };
     let dest_ptr = dest.as_ref().map_or(cp(arg(c, 2)), |r| r as *const _);
-    hr(unsafe { (v.Present)(p, cp(arg(c, 1)), dest_ptr, win, cp(arg(c, 4))) })
+    let r = unsafe { (v.Present)(p, cp(arg(c, 1)), dest_ptr, win, cp(arg(c, 4))) };
+    if r.is_ok() {
+        clear_back_buffer(p, v);
+    }
+    hr(r)
+}
+
+/// The whole back buffer black after a Present. The game clears only depth and stencil and
+/// draws over every pixel, except where its picture is narrower than the back buffer (its 4:3
+/// menus on a wider one, `video`): the sides would keep whatever was there.
+fn clear_back_buffer(p: *mut c_void, v: &IDirect3DDevice9_Vtbl) {
+    unsafe {
+        let mut target: *mut c_void = std::ptr::null_mut();
+        if (v.GetRenderTarget)(p, 0, &mut target as *mut _ as _).is_err() || target.is_null() {
+            return;
+        }
+        let surface = IDirect3DSurface9::from_raw(target);
+        let mut desc = D3DSURFACE_DESC::default();
+        let mut back: *mut c_void = std::ptr::null_mut();
+        let ok = surface.GetDesc(&mut desc).is_ok()
+            && (v.GetBackBuffer)(p, 0, 0, D3DBACKBUFFER_TYPE_MONO, &mut back as *mut _ as _).is_ok()
+            && back == target;
+        if !back.is_null() {
+            drop(IDirect3DSurface9::from_raw(back));
+        }
+        if !ok {
+            return;
+        }
+        let mut kept = D3DVIEWPORT9::default();
+        if (v.GetViewport)(p, &mut kept).is_err() {
+            return;
+        }
+        let full = D3DVIEWPORT9 { X: 0, Y: 0, Width: desc.Width, Height: desc.Height, MinZ: 0.0, MaxZ: 1.0 };
+        let _ = (v.SetViewport)(p, &full);
+        let _ = (v.Clear)(p, 0, std::ptr::null(), D3DCLEAR_TARGET as u32, 0xff00_0000, 1.0, 0);
+        let _ = (v.SetViewport)(p, &kept);
+    }
 }
 
 fn set_gamma_ramp(c: &mut Cpu) -> u32 {

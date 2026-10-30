@@ -101,20 +101,21 @@ Updated 2026-10-30. Details on how things work: CLAUDE.md. Design:
 - [ ] Frame rate, later: a frame-rate limit setting; performance for 480 fps (now ~6-8 ms a
       frame in a mission); the game's demo recorder (Demo/recordDemo, playDemo) to compare
       the same play at two rates
-- [x] Resolution and widescreen, first part (`video.rs`): the Video menu offers every mode of
-      the display (the game cut the list at 1600x1200 twice: the enumeration filter set at
-      0x459743, and the count 0x46dbc0); the menu switches at once and keeps the choice in
-      persist.dat. Aspect: a camera's projection takes the back buffer's own width / height
-      for the game's 4:3 (entry 0 of aspect_value 0x5499a0, "Normal"), so the 3D view fills
-      any display undistorted and sees more at the sides (Hor+); elsewhere 4:3 stays (the
-      viewport and cinema bars take it as the monitor's shape). Seen at 2560x1440
+- [x] Resolution and widescreen (`video.rs`): the Video menu offers every mode of the display
+      (the game cut the list at 1600x1200 twice: the enumeration filter set at 0x459743, and
+      the count 0x46dbc0); the menu switches at once and keeps the choice in persist.dat.
+      Aspect: the monitor's shape (aspect_auto 0x549600) and the picture's 4:3 ("Normal",
+      entry 0 of aspect_value 0x5499a0) are the back buffer's width / height, so missions
+      fill any display undistorted and see more at the sides (Hor+) and the 4:3 menus stand
+      in the middle (the game's own windowbox; the back buffer is cleared black after each
+      Present). Seen at 2560x1440: menus, briefing, mission; 1024x768 unchanged
 - [x] HUD at any resolution (`hud.rs`): the HUD's functions (0x43c210 each frame, the set-up
       0x43c890/0x43cf60, the sprite sheets' viewport 0x43cf30, the players' parts of the
       screen at 0x656980) see a screen 768 pixels high (1365x768 for 2560x1440), the overlay
       pages they draw are scaled up (0x48d8f0). Seen at 2560x1440: the panels, the crosshair
       and the target markers as at 1024x768; 1024x768 unchanged
-- [ ] Resolution, still open: the menus and the door transition are stretched to a wider
-      back buffer (as the game always did: pillarbox them, 4:3 in the middle?); the radar is
+- [ ] Resolution, still open: the door transition is stretched to a wider back buffer; the
+      menu background's scrolling text shows faintly beside the 4:3 middle; the radar is
       wider than round (it follows the screen's width); our own resolution setting (the
       game's needs its menu, which takes keys only in parts)
 - [ ] DirectInput: buffered keyboard data (GetDeviceData; the game uses it for short presses),

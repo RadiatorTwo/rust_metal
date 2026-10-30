@@ -93,7 +93,8 @@ graph is the object later tasks play music through), `dsound.rs` (DirectSoundCre
 `d3d9/` (Direct3D 9 passed through to the system's d3d9.dll, see below), `crt.rs` (`__ftol`
 hooked; the game's warning report 0x557f40 goes to our log as "game: ..."),
 `sample.rs` (`GUNMETAL_SAMPLE=1` profiler), `video.rs` (the Video menu offers every display mode, not
-only up to 1600x1200; a camera's 4:3 means the back buffer's own shape: Hor+ widescreen),
+only up to 1600x1200; the monitor and the game's 4:3 picture are the back buffer's own shape: Hor+
+widescreen in missions, the 4:3 menus in the middle),
 `hud.rs` (the HUD laid out for a screen 768 pixels high and scaled up: as big as at 1024x768), `fps.rs` (the frame rate: missions are uncapped with
 40 ms logic ticks; the camera, model nodes, particles and trails are drawn interpolated between the last two
 ticks, registry `Smooth` = 0 turns it off; `GUNMETAL_STEPS=1` logs where the step is asked
@@ -116,7 +117,8 @@ nearest, exceptions masked (`fpu_after_create_device`). Never exclusive fullscre
 device is always windowed (`with_present_params`; the game sees its own fullscreen
 parameters back, the display mode stays the desktop's), and Present puts the back buffer
 into our window with its aspect ratio, black bars painted with GDI (`letterbox`,
-`window::picture`). A fullscreen device of the game's makes input positions its back
+`window::picture`), and then clears the back buffer black (`clear_back_buffer`: the game draws
+only the 4:3 middle of a wider one in its menus). A fullscreen device of the game's makes input positions its back
 buffer's pixels (`window::set_game_size`) until a Reset to windowed.
 16-bit display modes: the game wants every resolution in exactly two display formats
 (d3d_prune 0x46afd0; XP drivers had R5G6B5 and X8R8G8B8); Windows 8 and later have no 16-bit

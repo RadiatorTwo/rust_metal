@@ -218,7 +218,7 @@
 0x469740 d3d_enum_modes       thiscall on 0x6757e8 (filter: min w, min h, max w, max h, ..., flags +0x18): enumerates the adapters' modes the filter lets through (check 0x46b850); game_start sets 640x480..1600x1200 at 0x459743 unless options+0x9c
 0x46dbc0 d3d_mode_count       thiscall(adapter, format, only up to 1600x1200): modes in the list; 0x46dc70 the n-th (width, height)
 0x5499a0 aspect_value         cdecl(index) -> st0: 4:3, 1.66, 16:9, 1.85, 2.00, 2.35 (6 = AUTO: a warning, 1.0)
-0x549600 aspect_auto          cdecl(monitor type, screen w, screen h) -> st0: render h * (16 or 4) / (render w * (9 or 3)) * w / h
+0x549600 aspect_auto          cdecl(monitor type, screen w, screen h) -> st0: the monitor's shape through that screen: render h * (16 or 4) / (render w * (9 or 3)) * w / h; viewport_set 0x5496f0 compares the picture's aspect with it (narrower: bars at the sides, wider: top and bottom)
 0x40c2b0 camera_apply         thiscall(camera): cam_set, then the projection's aspect: AspectRatio 6 -> aspect_auto, else aspect_value; 0x549cb0 with the FOV
 0x46eec0 render_width         thiscall on the renderer 0x675d40: [+0x24] when +0x1a, else +0x4ba4c (0x46eee0 the height, +0x4ba50)
 0x43c210 hud_frame            thiscall on the HUD (0x6556c8?): per frame the HUD's layout from the screen's size, the sprite sheets (0x656d30) and the players' parts (0x656980), then hud_draw at 0x43c78b

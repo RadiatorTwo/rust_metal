@@ -8,13 +8,14 @@
 //!
 //! Aspect ratio: the game knows the monitor's shape (Graphics/MonitorType, proj_data+0x354: 4:3
 //! or 16:9) and the picture's (Graphics/AspectRatio, +0x358, the menu's "Seitenverhältnis":
-//! 4:3 = "Normal", 1.66, 16:9, 1.85 ("Breitwand"), 2.00, 2.35, AUTO); aspect_value (0x5499a0)
-//! turns either into a number. A camera's projection takes the picture's: there entry 0 (4:3)
-//! is the back buffer's own width / height now (square pixels: our window keeps the aspect
-//! ratio), so "Normal" fills any display undistorted and wider ones see more at the sides
-//! (Hor+). Everywhere else entry 0 stays 4:3: the viewport and the cinema bars (0x5496f0 with
-//! 0x664678, hud_draw) take it as "the monitor's 4:3" and would put bars on a wider picture. The
-//! menus are stretched to the back buffer, as the game always did.
+//! 4:3 = "Normal", 1.66, 16:9, 1.85 ("Breitwand"), 2.00, 2.35, AUTO). A picture narrower than the
+//! monitor gets bars at the sides, a wider one at the top and bottom (viewport_set 0x5496f0).
+//! The monitor is our back buffer now, whatever its shape (square pixels: our window keeps the
+//! aspect ratio): aspect_auto (0x549600, the monitor's shape for the viewport and AUTO) gives the
+//! screen's width / height, and the picture's 4:3 (entry 0 of aspect_value 0x5499a0, "Normal")
+//! is the back buffer's shape too. So in a mission the 3D view fills any display undistorted and
+//! sees more at the sides (Hor+), and the menus, which ask for 4:3 themselves, stand in the
+//! middle with black sides (the game draws only its 4:3 part: `d3d9` clears the rest).
 
 use super::mem;
 use crate::rt::{Cpu, ESP, call_original};
@@ -29,10 +30,9 @@ pub const ASPECT_VALUE: u32 = 0x5499a0;
 /// The renderer: its back buffer's size at +0x4ba4c/+0x4ba50, or at [+0x24] when +0x1a is set
 /// (render_width 0x46eec0, render_height 0x46eee0).
 pub(super) const RENDERER: u32 = 0x675d40;
-/// Where a camera's projection takes its aspect (camera_apply 0x40c2b0 and two more: if
-/// AspectRatio is AUTO aspect_auto, else aspect_value): only there entry 0 is the picture's own
-/// shape.
-const CAMERA: [u32; 3] = [0x40c32f, 0x4a4caf, 0x4a5006];
+/// cdecl(monitor type, screen width, screen height) -> st0: the monitor's shape, as seen through
+/// a screen of that size.
+pub const ASPECT_AUTO: u32 = 0x549600;
 
 pub fn enum_modes(c: &mut Cpu) {
     let filter = mem().rd32(c.r[ESP] + 4);
@@ -59,8 +59,7 @@ pub(super) fn render_size() -> (u32, u32) {
 
 pub fn aspect_value(c: &mut Cpu) {
     let (w, h) = render_size();
-    let from = mem().rd32(c.r[ESP]);
-    if mem().rd32(c.r[ESP] + 4) != 0 || w == 0 || h == 0 || !CAMERA.contains(&from) {
+    if mem().rd32(c.r[ESP] + 4) != 0 || w == 0 || h == 0 {
         return call_original(c, ASPECT_VALUE);
     }
     c.fpush(w as f64 / h as f64);
@@ -68,4 +67,17 @@ pub fn aspect_value(c: &mut Cpu) {
     c.r[ESP] += 4;
 }
 
-pub const HOOKS: [(u32, crate::rt::Hook); 3] = [(ENUM_MODES, enum_modes), (MODE_COUNT, mode_count), (ASPECT_VALUE, aspect_value)];
+/// The monitor is the back buffer: its shape through a screen of w x h is w / h.
+pub fn aspect_auto(c: &mut Cpu) {
+    let m = mem();
+    let (w, h) = (m.rd32(c.r[ESP] + 8), m.rd32(c.r[ESP] + 12));
+    if w == 0 || h == 0 {
+        return call_original(c, ASPECT_AUTO);
+    }
+    c.fpush(w as f64 / h as f64);
+    // ret
+    c.r[ESP] += 4;
+}
+
+pub const HOOKS: [(u32, crate::rt::Hook); 4] =
+    [(ENUM_MODES, enum_modes), (MODE_COUNT, mode_count), (ASPECT_VALUE, aspect_value), (ASPECT_AUTO, aspect_auto)];
