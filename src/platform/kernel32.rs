@@ -204,6 +204,7 @@ fn exit_process(c: &mut Cpu) -> u32 {
     super::advapi32::save();
     log!("ExitProcess({code})");
     super::frames::finish();
+    super::ticks::finish();
     std::process::exit(code as i32)
 }
 
@@ -502,10 +503,17 @@ fn heap_create(_: &mut Cpu) -> u32 {
 }
 
 fn heap_alloc(c: &mut Cpu) -> u32 {
-    alloc(arg(c, 2))
+    let p = alloc(arg(c, 2));
+    if super::ticks::on() {
+        super::ticks::allocated(p, arg(c, 2));
+    }
+    p
 }
 
 fn heap_free(c: &mut Cpu) -> u32 {
+    if super::ticks::on() {
+        super::ticks::allocated(arg(c, 2), 0);
+    }
     free(arg(c, 2)) as u32
 }
 
@@ -515,7 +523,12 @@ fn heap_realloc(c: &mut Cpu) -> u32 {
     if flags & 0x10 != 0 {
         return if block_size(p) >= n { p } else { 0 };
     }
-    realloc(p, n)
+    let q = realloc(p, n);
+    if super::ticks::on() && q != 0 {
+        super::ticks::allocated(p, 0);
+        super::ticks::allocated(q, n);
+    }
+    q
 }
 
 fn heap_size(c: &mut Cpu) -> u32 {
@@ -1624,5 +1637,6 @@ fn exit_process_from_terminate(c: &mut Cpu) -> u32 {
     super::advapi32::save();
     log!("TerminateProcess({code})");
     super::frames::finish();
+    super::ticks::finish();
     std::process::exit(code as i32)
 }

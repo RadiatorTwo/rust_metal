@@ -201,7 +201,7 @@ the machinery without overlap); `check` (overlap plus the reports of 1.11).
 
 ### Step 0: measurements that decide details (no change in behaviour)
 
-- [ ] At mission start, log the C runtime's heap type at 0x770EA8 (1 = system heap: malloc is
+- [x] (all step-0 items done 2026-10-31, answers in section 5) At mission start, log the C runtime's heap type at 0x770EA8 (1 = system heap: malloc is
       HeapAlloc one to one; 3 = small-block heap: then hook malloc 0x5888b4, free, realloc,
       _msize onto the host allocator in step 2). Find any of the game's own pools
       (`GUNMETAL_COUNT` on malloc against HeapAlloc per tick).
@@ -312,14 +312,31 @@ the machinery without overlap); `check` (overlap plus the reports of 1.11).
 
 ## 5. Open questions (measure first, step 0)
 
-1. The C runtime heap type (0x770EA8) and the game's own pools.
-2. GetWriteWatch cost over the mapped ranges; committed size of A.
-3. What the ~103 lock-buffer pages written per tick are.
+Answered in step 0 (2026-10-31; `.superpowers/perf/task-tt0-report.md`, PLAN.md):
+
+1. The C runtime heap type (0x770EA8) and the game's own pools. **1, the system heap: malloc is
+   HeapAlloc one to one** (~24 per tick). No hook of malloc needed. Own pools: the router's id
+   containers (slot arrays); slots taken in a tick need the tick-wins rule.
+2. GetWriteWatch cost over the mapped ranges; committed size of A. **~0.65 ms per call, fixed
+   (any range size); 2 ms over 4 GB.** 0.1 ms is not reachable with write watch: one call per
+   fork over one range at most, or our own dirty-page map written by the generated stores.
+   **A: 160 MB committed** (3x fits).
+3. What the ~103 lock-buffer pages written per tick are. **False sharing**: small shadows
+   (texture levels, index/vertex buffers) share their pages with heap blocks the tick writes.
+   No rule needed for shadows; the merge must work on bytes there (B against C).
 4. vtable +0x4c after the loop and 0x665193: per-frame drawing code, or logic that expects the
-   tick's result?
-5. Are fingerprints of two `off` runs with tick-indexed input identical (determinism)?
+   tick's result? **0x504360: per frame, writes router +0x90a0/+0x90a4 and its list cursor;
+   calls `ret 4` for every object: harmless (tick wins). 0x665193: a debug key's flag, read
+   nowhere.**
+5. Are fingerprints of two `off` runs with tick-indexed input identical (determinism)? **No,
+   not entirely**: game time, camera and object counts are; the `_rand` order and some unit
+   values depend on how ticks fall into frames (the drawing between two ticks changes what the
+   next tick reads, e.g. an effects list's order), and Smooth on/off changes unit values. The
+   equivalence test needs a fixed frame schedule (one tick per frame, or the same frames:
+   a lockstep test clock) or compares only time/camera/objects.
 6. P6 against drawing time per picture: decides whether step 6 is needed now (P6 > drawing) or
-   only for 480 fps (drawing ~2 ms).
+   only for 480 fps (drawing ~2 ms). **P6 avg 5.8 ms against drawing 7.0; P6 longer in 13-18 %
+   of tick pictures**: step 4 alone already hides most of P6; step 6 for the rest.
 
 ### Critical files
 

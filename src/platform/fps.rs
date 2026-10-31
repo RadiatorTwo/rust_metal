@@ -36,7 +36,7 @@
 //! (game_frame's call of 0x44d9f0, envelopes of a list at 0x661d6c whose results are not
 //! stored: probably the Xbox version's rumble).
 
-use super::{advapi32, frames, guest_call, log, mem};
+use super::{advapi32, frames, guest_call, log, mem, ticks};
 use crate::rt::{Cpu, ECX, ESP, call_original};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
@@ -112,6 +112,9 @@ pub fn game_frame(c: &mut Cpu) {
     let log = frames::on();
     if log {
         frames::frame_start();
+    }
+    if ticks::on() {
+        ticks::frame();
     }
     IN_FRAME.store(true, Ordering::Relaxed);
     call_original(c, GAME_FRAME);
@@ -281,6 +284,9 @@ fn write(a: u32, v: &[f32]) {
 pub fn cam_set(c: &mut Cpu) {
     let m = mem();
     let (pos, rot) = (m.rd32(c.r[ESP] + 4), m.rd32(c.r[ESP] + 8));
+    if ticks::on() {
+        ticks::camera(pos, rot);
+    }
     let Some(a) = alpha() else {
         return call_original(c, CAM_SET);
     };
@@ -382,11 +388,20 @@ pub fn in_tick() -> bool {
 
 fn tick_part(c: &mut Cpu, i: usize) {
     let outer = IN_TICK.fetch_add(1, Ordering::Relaxed) == 0;
+    let aids = outer && ticks::on();
+    if aids {
+        ticks::part_start();
+    }
+    // the world update's this (0x413c60), for the fingerprint
+    let world = c.r[ECX];
     let t = (outer && frames::on()).then(frames::part_start);
     call_original(c, TICK_PARTS[i]);
     IN_TICK.fetch_sub(1, Ordering::Relaxed);
     if let Some(t) = t {
         frames::part_end(i, t);
+    }
+    if aids && i == TICK_PARTS.len() - 1 {
+        ticks::tick_end(world);
     }
 }
 

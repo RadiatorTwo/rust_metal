@@ -258,7 +258,8 @@ How the game starts (`GUNMETAL_TRACE_API=1` shows every import call):
    (367 MB). Without an image the check fails unless the game folder has gmsetup\data2.cab.
 
 Env: `GUNMETAL_TRACE_API` (imports with arguments), `GUNMETAL_TRACE_REG`, `GUNMETAL_TRACE_MSG`,
-`GUNMETAL_INPUT` (scripted input, see `window.rs`; real keyboard and mouse ignored),
+`GUNMETAL_INPUT` (scripted input, see `window.rs`; real keyboard and mouse ignored; items
+`t<N>:<what>` are delivered at the start of mission tick N, durations in ticks),
 `GUNMETAL_WINDOW=WxH`, `GUNMETAL_MONITOR=n`, `GUNMETAL_WATCH` (where the game is, every 2 s),
 `GUNMETAL_PROF`, `GUNMETAL_SAMPLE`, `GUNMETAL_STEPS`, `GUNMETAL_TRACE_ROUTER`, `GUNMETAL_TRACE_LIFE`, `GUNMETAL_NO_MF` (music off),
 `GUNMETAL_COUNT=<file>`, `GUNMETAL_FRAMES=<file>` (per picture: Present time, interval, time to
@@ -266,12 +267,25 @@ produce it, ticks and their time, and where the main thread's time went: imports
 waits for the turn and who held it, page faults, CPU time; summaries every 2 s and at ExitProcess;
 at the exit the imports called inside ticks and time per tick part; with `GUNMETAL_FRAMES_PAGES=1`
 also guest pages written by the ticks and the drawing, from write-watch probes every 20th picture,
-which the summaries leave out with the picture after each), `GUNMETAL_SHOT=shot/x.png` (the back buffer before Present, at most every
+which the summaries leave out with the picture after each, and the COM lock buffers' pages by
+owner; at the exit also the world update 0x413c60 against the drawing after it, per picture),
+`GUNMETAL_TICK_PRINT=<file>` (`ticks.rs`: a logic fingerprint per mission tick, values only:
+game time, camera place, objects per id type, hashes of the units and the player's object,
+`_rand` calls and seed; compare two runs with `cargo run --release --example tickprint -- a b`;
+`GUNMETAL_TICK_PRINT_UNITS=<tick>[,..]` adds the units' hashed values at those ticks,
+`GUNMETAL_TICK_PRINT_RAND=1` each tick's `_rand` callers in order; a script item `stall*ms` sleeps
+the main thread so the next frame runs 2-3 ticks),
+`GUNMETAL_TICK_PROBE=1` (the tick thread's step-0 measurements, logged at the exit: C runtime heap
+type, malloc/free and `_rand` in and outside ticks with callers, the router's per-frame method,
+GetWriteWatch costs and the committed size; either TICK variable adds `ticks::HOOKS`, part of the
+cache key), `GUNMETAL_SHOT=shot/x.png` (the back buffer before Present, at most every
 `GUNMETAL_SHOT_MS`, 500; `{t}` in the name: ms since start; `shot/` is git-ignored: game imagery is
 never committed).
 
 Tools: `cargo run --release --example functions -- game_files [--gaps]` (find + compile,
 statistics), `examples/dis.rs <folder> <addr|all>`, `examples/ghidra.rs <folder> [json]`
 (discovery against the Ghidra export; `GUNMETAL_NO_GHIDRA=1` seeds with the entry point
-alone), `examples/imports.rs <exe>`, `examples/resources.rs`. `cargo test --release` needs no
+alone), `examples/imports.rs <exe>`, `examples/resources.rs`, `examples/tickprint.rs a b`
+(first difference of two fingerprint files), `examples/watchbench.rs` (GetWriteWatch's cost
+without the game). `cargo test --release` needs no
 game files.

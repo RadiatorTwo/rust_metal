@@ -67,6 +67,16 @@ pub struct Stats {
     pub max: f64,
 }
 
+/// The `p`-th percentile (nearest rank, 1..=100) of some times; 0 for none.
+pub fn percentile(v: &[f64], p: usize) -> f64 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    let mut s = v.to_vec();
+    s.sort_by(f64::total_cmp);
+    s[(s.len() * p.clamp(1, 100)).div_ceil(100).clamp(1, s.len()) - 1]
+}
+
 pub fn stats(v: &[f64]) -> Stats {
     if v.is_empty() {
         return Stats::default();
@@ -117,6 +127,10 @@ struct Picture {
     ticks: u32,
     mission: bool,
     probe: bool,
+    /// the world update's (0x413c60) time in its frame, and the drawing's: from the last tick
+    /// part's end (or game_frame's start) to Present
+    p6: f64,
+    draw: f64,
 }
 
 /// Pages written in parts of one probed frame (guest page numbers, ascending).
@@ -218,6 +232,12 @@ struct Frames {
     probed_ticks: u32,
     /// how often each page was written by both
     both: BTreeMap<u32, u32>,
+    /// COM lock buffer pages written in ticks / by the drawing after them, by owner
+    com_ticks: BTreeMap<String, u64>,
+    com_draw: BTreeMap<String, u64>,
+    /// this picture's world update time, and where its drawing started
+    p6: Duration,
+    drawn_from: Option<Instant>,
     #[cfg(windows)]
     watch: Vec<usize>,
 }
@@ -231,7 +251,9 @@ static FRAMES: Mutex<Option<Frames>> = Mutex::new(None);
 /// other guest threads' time with the turn (all, and the longest holder `start:ms`), the import
 /// with the most time `name:ms`, our clear of the back buffer after the last Present, the
 /// process's page faults, the main thread's CPU time (cycles, in ms of the TSC).
-const COLUMNS: &str = "present_ms interval_ms produce_ms present_call_ms ticks tick_ms mission probe imports_ms imports wait_ms waits others_ms holder top_import clear_ms faults cpu_ms";
+/// Last, the world update's (0x413c60) time in this frame and the drawing's (from the last tick
+/// part's end, or game_frame's start, to Present).
+const COLUMNS: &str = "present_ms interval_ms produce_ms present_call_ms ticks tick_ms mission probe imports_ms imports wait_ms waits others_ms holder top_import clear_ms faults cpu_ms p6_ms draw_ms";
 
 #[derive(Default)]
 struct Detail {
@@ -325,6 +347,10 @@ pub fn init(sections: Vec<(String, u32, u32)>) {
         sum_picture_no_tick: PageSum::default(),
         probed_ticks: 0,
         both: BTreeMap::new(),
+        com_ticks: BTreeMap::new(),
+        com_draw: BTreeMap::new(),
+        p6: Duration::ZERO,
+        drawn_from: None,
         #[cfg(windows)]
         watch: vec![0; crate::rt::GUEST_SPAN / 4096 + 1],
     });
@@ -438,7 +464,9 @@ pub fn frame_start() {
     let p = m.rd32(super::fps::PROJ_DATA);
     let mission = p != 0 && m.rd32(p + 0x4c4) != 0;
     with(|s| {
-        s.frame_start = Some(Instant::now());
+        let now = Instant::now();
+        s.frame_start = Some(now);
+        s.drawn_from = Some(now);
         s.frame_mission = mission;
     });
 }
@@ -497,7 +525,9 @@ pub fn part_end(i: usize, t: Instant) {
         p.1 += d;
         p.2 = p.2.max(d);
         s.last_part_end = Some(now);
+        s.drawn_from = Some(now);
         if i == super::fps::TICK_PARTS.len() - 1 {
+            s.p6 += d;
             end_tick(s);
         }
     });
@@ -558,6 +588,8 @@ pub fn after_present() {
         let call = s.present_call.take().unwrap_or(now);
         let interval = s.last_present.map_or(0.0, |l| ms(call - l));
         let produce = s.frame_start.or(s.last_present).map_or(0.0, |f| ms(call - f));
+        let p6 = ms(std::mem::take(&mut s.p6));
+        let draw = s.drawn_from.take().or(s.last_present).map_or(0.0, |f| ms(call - f));
         let probe = s.probe.take();
         let probed = probe.is_some();
         if let Some(p) = probe {
@@ -577,7 +609,7 @@ pub fn after_present() {
         let tsc_per_ms = tsc().wrapping_sub(s.tsc0.0) as f64 / ms(s.tsc0.1.elapsed()).max(1e-9);
         let _ = writeln!(
             s.out,
-            "{:.3} {interval:.3} {produce:.3} {:.3} {} {:.3} {} {} {:.3} {} {:.3} {} {:.3} {holder} {top} {:.3} {} {:.3}",
+            "{:.3} {interval:.3} {produce:.3} {:.3} {} {:.3} {} {} {:.3} {} {:.3} {} {:.3} {holder} {top} {:.3} {} {:.3} {p6:.3} {draw:.3}",
             ms(call - s.t0),
             ms(now - call),
             s.ticks,
@@ -598,7 +630,7 @@ pub fn after_present() {
         if s.last_present.is_some() {
             // the first mission picture's interval reaches back into the loading: not a mission one
             let mission = s.frame_mission && s.last_mission;
-            s.pictures.push(Picture { at: call, interval, ticks: s.ticks, mission, probe: disturbed });
+            s.pictures.push(Picture { at: call, interval, ticks: s.ticks, mission, probe: disturbed, p6, draw });
         }
         s.last_mission = s.frame_mission;
         s.last_present = Some(call);
@@ -645,6 +677,19 @@ fn finish_probe(s: &mut Frames, p: Probe, ticks: u32) {
         return;
     }
     let r = regions(s);
+    let owners = super::com::shadow_owners();
+    let owner = |pg: u32| {
+        let (lo, hi) = (pg << 12, (pg << 12) + 0x1000);
+        // a shadow covering the whole page, or sharing it with other heap blocks
+        owners.iter().find(|o| o.0 < hi && lo < o.1).map(|o| format!("{} ({})", o.2, if o.0 <= lo && hi <= o.1 { "whole page" } else { "shares the page" }))
+    };
+    for (pages, sum) in [(&p.ticks, &mut s.com_ticks), (&p.draw, &mut s.com_draw)] {
+        for &pg in pages.iter() {
+            if let Some(o) = owner(pg) {
+                *sum.entry(o).or_default() += 1;
+            }
+        }
+    }
     let both = common(&p.ticks, &p.draw);
     for &pg in &both {
         *s.both.entry(pg).or_default() += 1;
@@ -671,6 +716,26 @@ pub fn finish() {
     let mission: Vec<&Picture> = s.pictures.iter().filter(|p| p.mission).collect();
     if !mission.is_empty() {
         log!("frames: mission pictures: {}", show_summary(&window_summary(mission.iter().copied())));
+        // the world update against the drawing, per picture (step 6 of the tick thread's plan)
+        let clean: Vec<&&Picture> = mission.iter().filter(|p| !p.probe).collect();
+        let dist = |v: &[f64]| {
+            let st = stats(v);
+            format!("{} x avg {:.2} p50 {:.2} p99 {:.2} max {:.2} ms", st.n, st.avg, percentile(v, 50), st.p99, st.max)
+        };
+        let ticked: Vec<&&&Picture> = clean.iter().filter(|p| p.ticks > 0).collect();
+        let p6: Vec<f64> = ticked.iter().map(|p| p.p6).collect();
+        let draw_t: Vec<f64> = ticked.iter().map(|p| p.draw).collect();
+        let draw_n: Vec<f64> = clean.iter().filter(|p| p.ticks == 0).map(|p| p.draw).collect();
+        let longer = ticked.iter().filter(|p| p.p6 > p.draw).count();
+        let ratio: Vec<f64> = ticked.iter().filter(|p| p.draw > 0.0).map(|p| p.p6 / p.draw).collect();
+        log!("frames: (5) world update 0x413c60 per picture with a tick: {}", dist(&p6));
+        log!("frames: (5) drawing (last tick part's end to Present) with a tick: {}; without a tick: {}", dist(&draw_t), dist(&draw_n));
+        log!(
+            "frames: (5) the world update took longer than the drawing after it in {longer} of {} pictures with a tick ({:.1}%); p6/draw: {}",
+            ticked.len(),
+            100.0 * longer as f64 / ticked.len().max(1) as f64,
+            dist(&ratio).replace(" ms", "")
+        );
     }
     let names = |k: usize| super::thunk_name(k);
     let ticks = s.total_ticks.max(1) as f64;
@@ -722,4 +787,11 @@ pub fn finish() {
         .map(|&(lo, hi, k)| format!("{:#x}..{:#x} ({}, {k}/{})", lo << 12, (u64::from(hi) + 1) << 12, r.of(lo << 12), s.sum_both.n))
         .collect();
     log!("frames: (4) written by both, most often: {}", shown.join(", "));
+    for (what, sum) in [("in ticks", &s.com_ticks), ("by the drawing after the ticks", &s.com_draw)] {
+        let n = s.sum_ticks.n.max(1) as f64;
+        let mut v: Vec<(&String, &u64)> = sum.iter().collect();
+        v.sort_by(|a, b| b.1.cmp(a.1));
+        let l: Vec<String> = v.iter().take(20).map(|(o, k)| format!("{o}: {:.1}", **k as f64 / n)).collect();
+        log!("frames: (3) COM lock buffer pages written {what}, per probed frame, by owner: {}", l.join("; "));
+    }
 }

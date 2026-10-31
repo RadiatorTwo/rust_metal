@@ -289,7 +289,7 @@ fn handle(s: &mut State, hwnd: u32, i: Input, scripted: bool) {
                 s.queue.push_back(if min { m(WM_SIZE, SIZE_MINIMIZED, 0) } else { m(WM_SIZE, SIZE_RESTORED, lp) });
             }
         }
-        Input::Poke(..) | Input::LoseDevice(_) => {}
+        Input::Poke(..) | Input::LoseDevice(_) | Input::Stall(_) => {}
     }
 }
 

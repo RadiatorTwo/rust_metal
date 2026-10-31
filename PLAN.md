@@ -177,6 +177,40 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
       lock buffers ~50, .data ~10), the same heap ranges in every probe. A world copy for (a)
       would have to sync ~3.3 MB of pages per tick, and the drawing writes ~1.1 MB of pages
       that the tick writes too (object/node state, not only renderer data)
+      Step 0 of `docs/superpowers/plans/2026-10-31-tick-thread.md` (2026-10-31, `ticks.rs`,
+      `GUNMETAL_TICK_PROBE`, `GUNMETAL_TICK_PRINT`, tick-indexed `GUNMETAL_INPUT` items `t<N>:`;
+      report `.superpowers/perf/task-tt0-report.md`; mission 1, 651 ticks, ~14 cold runs):
+      (1) C runtime heap type 1 (system heap): malloc/new go straight to HeapAlloc (~24 per
+      tick, frees ~21), no small-block heap. Pools of the game's own: the router's id
+      containers (slot arrays: units 512, type 4 1024, type 3 100) hand out slots.
+      (2) GetWriteWatch costs ~0.65 ms per call whatever the range (4 KB or 150 MB; also in a
+      reservation of its own, `examples/watchbench.rs`), ~2 ms over the whole 4 GB; 5 committed
+      ranges 4 ms. The plan's 0.1 ms per call is out of reach: step 1 needs one call per fork at
+      most, or a dirty map of our own (stores in the generated code marking pages). Committed
+      guest memory in a mission: 160 MB (3x = 480 MB, fits).
+      (3) The ~100 "COM lock buffer" pages per tick are false sharing: small texture-level,
+      index and vertex buffer shadows (16 B..128 KB) share their pages with game heap blocks; no
+      shadow page is written whole by a tick.
+      (4) World update 0x413c60 per picture with a tick avg 5.8 ms (p50 5.6, p99 13.6, max 20.6)
+      against the drawing after it 7.0 (p50 7.1, p99 11.5); longer than the drawing in 13-18 %
+      of the tick pictures (25 % with page probes): step 6 matters for those.
+      (5) Vtable +0x4c of world+0x2c (the router) after the tick loop is 0x504360: per frame it
+      writes the router's +0x90a0 (game time) and +0x90a4 (game time - last tick's, x 0.03:
+      always 0) and walks its list of ~1590 objects calling method +0x44, which is 0x40d0a0
+      (`ret 4`) for all of them: no logic, but the list's cursor (llist pCurrent, +0xc) is
+      written. Flag 0x665193: set by a debug key in game_frame's typed-key switch, cleared after
+      the loop, read nowhere else.
+      (6) `_rand`: ~162 calls per tick (particles/effects 0x53c..0x544, 0x4d0f78), none outside
+      ticks in a mission (only in the front end); srand(0) at the mission's start.
+      (7) Determinism: two runs with the same tick-indexed input agree in game time, camera
+      place and object counts for all 651 ticks; `_rand` order and some unit values differ in
+      a few ticks from run to run, and a forced 2-3-tick frame (`stall*130`) changes the order
+      of an emitter's `_rand` calls in the second tick of that frame (0x53d933.., from late to
+      early in the tick), later the number of live units: the logic reads state the drawing
+      writes between ticks (an effects list's order, unit values). Smooth (fps.rs) on against
+      off changes +0x150..+0x158 of 22 objects of class 0x5e6d88 from tick 3 on (deterministic
+      in each setting): the logic reads something the smoothing changes. Seen once in ~15 runs:
+      a null read in 0x504360's list walk (llist pCurrent) while the mission loaded.
 - [ ] Smooth pictures, left at the tick (small): water (0x530da0, its waves if they move),
       the radar's dots (0x444035, 0x4440e6), a trail's texture scroll (+0x98); look at it
       in play (does anything still shake?)

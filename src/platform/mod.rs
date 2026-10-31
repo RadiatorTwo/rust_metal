@@ -29,6 +29,7 @@ pub mod music;
 pub mod ole32;
 pub mod router;
 pub mod sample;
+pub mod ticks;
 pub mod user32;
 pub mod video;
 pub mod window;
@@ -274,6 +275,11 @@ static THUNKS: Mutex<Vec<Thunk>> = Mutex::new(Vec::new());
 /// The name of thunk `k` (for the profiler).
 pub fn thunk_name(k: usize) -> String {
     lock(&THUNKS).get(k).map_or_else(|| "?".into(), |t| t.name.clone())
+}
+
+/// The thunk index of a guest thunk address.
+pub fn thunk_index(a: u32) -> Option<usize> {
+    (THUNK_LO..THUNK_LO + 4 * THUNK_N).contains(&a).then(|| ((a - THUNK_LO) / 4) as usize)
 }
 
 fn thunk_add(name: String, nargs: i32, f: Option<ImpFn>) -> u32 {
@@ -838,12 +844,16 @@ fn find_import(dll: &str, name: &str) -> Option<&'static Import> {
 }
 
 /// The hooks of this run: `HOOKS`, and with `GUNMETAL_TRACE_LIFE` set also the game's life
-/// trace (`crash::LIFE_HOOKS`). The compiled code depends on the set (main.rs keys its cache
+/// trace (`crash::LIFE_HOOKS`), with `GUNMETAL_TICK_PRINT` or `GUNMETAL_TICK_PROBE` the tick
+/// aids' (`ticks::HOOKS`). The compiled code depends on the set (main.rs keys its cache
 /// with it).
 pub fn hooks() -> Vec<(u32, crate::rt::Hook)> {
     let mut h = HOOKS.to_vec();
     if std::env::var_os("GUNMETAL_TRACE_LIFE").is_some() {
         h.extend_from_slice(&crash::LIFE_HOOKS);
+    }
+    if ticks::hooks_wanted() {
+        h.extend_from_slice(&ticks::HOOKS);
     }
     h
 }
@@ -921,6 +931,11 @@ pub fn init_memory() -> &'static Memory {
     m
 }
 
+/// The heap arena's mapped range [start, end) (for measurements).
+pub fn heap_range() -> (u32, u32) {
+    (ARENA_LO, lock(&HEAP).mapped)
+}
+
 /// The end of the guest heap's used range (for tests that check nothing leaks).
 pub fn heap_top() -> u32 {
     lock(&HEAP).top
@@ -974,6 +989,7 @@ pub fn run_game(game: &crate::game::Game, game_dir: PathBuf) -> u32 {
     crash::register(crash::Kind::Main, game.exe.entry, TIB);
     frames::thread_start(game.exe.entry);
     frames::init(game.exe.sections.iter().map(|s| (s.name.clone(), s.va, s.va + s.vsize.max(s.rsize))).collect());
+    ticks::init();
     turn_take();
     c.r[ESP] -= 4;
     m.wr32(c.r[ESP], RET_MAGIC);

@@ -105,6 +105,22 @@ pub fn shadow_ranges() -> Vec<(u32, u32)> {
     with(|t| t.entries.iter().flatten().flat_map(|e| e.shadows.values().map(|s| (s.guest, s.guest + s.size))).collect())
 }
 
+/// Every shadow with its owner: [start, end) and "interface key size" (the interface's name
+/// from its vtable's first thunk), for the frame log's page findings.
+pub fn shadow_owners() -> Vec<(u32, u32, String)> {
+    let objs: Vec<(u32, Vec<(u32, Shadow)>)> = with(|t| t.entries.iter().flatten().map(|e| (e.guest, e.shadows.iter().map(|(k, s)| (*k, *s)).collect())).collect());
+    let mut out = Vec::new();
+    for (guest, shadows) in objs {
+        let first = mem().rd32(mem().rd32(guest));
+        let name = super::thunk_index(first).map(super::thunk_name).unwrap_or_default();
+        let iface = name.split("::").next().unwrap_or("?").to_string();
+        for (k, s) in shadows {
+            out.push((s.guest, s.guest + s.size, format!("{iface} key {k:#x} size {}", s.size)));
+        }
+    }
+    out
+}
+
 /// The guest buffer for (object, key) of at least `size` bytes: the same one while it is big
 /// enough, a new one (the old freed, contents not kept) when a bigger size is asked.
 pub fn shadow(this: u32, key: u32, size: u32) -> u32 {

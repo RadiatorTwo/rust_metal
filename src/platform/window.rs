@@ -56,6 +56,9 @@ pub enum Input {
     Poke(u32, u32),
     /// scripted only: the Direct3D device is lost for this many ms (`d3d9::device::simulate_loss`)
     LoseDevice(u32),
+    /// scripted only: the main thread sleeps this many ms (the next frame catches up with 2-3
+    /// logic ticks)
+    Stall(u32),
 }
 
 /// Whether input from the real keyboard, mouse and window reaches the game: in a scripted run
@@ -316,15 +319,22 @@ pub fn pump(wait: Duration) {
 /// to the front), `lose*2000` (the Direct3D device lost for 2000 ms, then waiting for the
 /// game's Reset), `poke@511fc0=1` (a dword written to guest memory, hex address and value),
 /// `text@Name` (typed characters, `_` a space).
+/// Items `t<N>:<what>` are tick-indexed: delivered at the start of mission tick N
+/// (`tick_inputs`, from `ticks::part_start`), not at a time. Their durations are ticks of 40 ms:
+/// a key held 3 ticks or `*n` ticks, a click's button down 1 tick after the move and up 3
+/// after, typed characters 1 tick apart. `close`, `blur`/`focus`, `lose*ms` and `poke@` work
+/// as tick items too; `minimize`/`restore` do not. `stall*ms` (both kinds): the main thread
+/// sleeps that long, so the next frame runs 2-3 ticks at once.
 fn scripted(app: &mut App) {
     static SCRIPT: Mutex<Option<VecDeque<(u64, Input)>>> = Mutex::new(None);
     let mut s = SCRIPT.lock().unwrap();
-    let script = s.get_or_insert_with(|| std::env::var("GUNMETAL_INPUT").map(|v| parse_script(&v)).unwrap_or_default());
+    let script = s.get_or_insert_with(|| std::env::var("GUNMETAL_INPUT").map(|v| parse_script(&v).ms).unwrap_or_default());
     let now = super::kernel32::start_time().elapsed().as_millis() as u64;
     while script.front().is_some_and(|e| e.0 <= now) {
         match script.pop_front().unwrap().1 {
             Input::Poke(a, v) => super::mem().wr32(a, v),
             Input::LoseDevice(ms) => super::d3d9::device::simulate_loss(Duration::from_millis(ms as u64)),
+            Input::Stall(ms) => std::thread::sleep(Duration::from_millis(ms as u64)),
             Input::Minimized(m) => {
                 if let Some(w) = &app.window {
                     w.set_minimized(m);
@@ -342,19 +352,57 @@ fn scripted(app: &mut App) {
     }
 }
 
-fn parse_script(text: &str) -> VecDeque<(u64, Input)> {
-    let mut ev = Vec::new();
+/// A parsed `GUNMETAL_INPUT`: events at ms since start, and events at mission ticks.
+#[derive(Debug, Default)]
+pub struct Script {
+    pub ms: VecDeque<(u64, Input)>,
+    pub ticks: VecDeque<(u64, Input)>,
+}
+
+static TICK_SCRIPT: Mutex<Option<VecDeque<(u64, Input)>>> = Mutex::new(None);
+
+fn with_tick_script<R>(f: impl FnOnce(&mut VecDeque<(u64, Input)>) -> R) -> R {
+    let mut s = TICK_SCRIPT.lock().unwrap();
+    f(s.get_or_insert_with(|| std::env::var("GUNMETAL_INPUT").map(|v| parse_script(&v).ticks).unwrap_or_default()))
+}
+
+/// The script has tick-indexed items.
+pub fn has_tick_inputs() -> bool {
+    with_tick_script(|s| !s.is_empty())
+}
+
+/// The tick-indexed events due at mission tick `tick` (and any still pending before it).
+pub fn tick_inputs(tick: u64) -> Vec<Input> {
+    with_tick_script(|s| {
+        let mut out = Vec::new();
+        while s.front().is_some_and(|e| e.0 <= tick) {
+            out.push(s.pop_front().unwrap().1);
+        }
+        out
+    })
+}
+
+/// `GUNMETAL_INPUT`'s text as events (see `scripted`).
+pub fn parse_script(text: &str) -> Script {
+    let (mut ms, mut ticks) = (Vec::new(), Vec::new());
     for item in text.split_whitespace() {
         let Some((t, what)) = item.split_once(':') else { continue };
+        let (tick, t) = match t.strip_prefix('t') {
+            Some(n) => (true, n),
+            None => (false, t),
+        };
         let Ok(t) = t.parse::<u64>() else { continue };
+        // a click's button down and up, a key's hold, typed characters' spacing
+        let (down, up, hold, step) = if tick { (1, 3, 3, 1) } else { (30, 130, 100, 50) };
+        let ev = if tick { &mut ticks } else { &mut ms };
         let at = |s: &str| -> Option<(i32, i32)> {
             let (x, y) = s.split_once(',')?;
             Some((x.parse().ok()?, y.parse().ok()?))
         };
         if let Some(text) = what.strip_prefix("text@") {
-            // typed characters (WM_CHAR), 50 ms apart; `_` is a space
+            // typed characters (WM_CHAR); `_` is a space
             for (n, ch) in text.chars().filter(|&c| (c as u32) < 256).enumerate() {
-                ev.push((t + 50 * n as u64, Input::Char(if ch == '_' { b' ' } else { ch as u8 })));
+                ev.push((t + step * n as u64, Input::Char(if ch == '_' { b' ' } else { ch as u8 })));
             }
         } else if let Some(p) = what.strip_prefix("poke@") {
             let hex = |s: &str| u32::from_str_radix(s, 16).ok();
@@ -369,8 +417,8 @@ fn parse_script(text: &str) -> VecDeque<(u64, Input)> {
                 "rclick" => 1,
                 _ => continue,
             };
-            ev.push((t + 30, Input::Button(b, true)));
-            ev.push((t + 130, Input::Button(b, false)));
+            ev.push((t + down, Input::Button(b, true)));
+            ev.push((t + up, Input::Button(b, false)));
         } else if what == "close" {
             ev.push((t, Input::Close));
         } else if what == "blur" || what == "focus" {
@@ -379,8 +427,10 @@ fn parse_script(text: &str) -> VecDeque<(u64, Input)> {
             ev.push((t, Input::Minimized(what == "minimize")));
         } else if let Some(ms) = what.strip_prefix("lose*").and_then(|m| m.parse().ok()) {
             ev.push((t, Input::LoseDevice(ms)));
+        } else if let Some(ms) = what.strip_prefix("stall*").and_then(|m| m.parse().ok()) {
+            ev.push((t, Input::Stall(ms)));
         } else {
-            let (name, hold) = what.split_once('*').map_or((what, 100), |(n, h)| (n, h.parse().unwrap_or(100)));
+            let (name, hold) = what.split_once('*').map_or((what, hold), |(n, h)| (n, h.parse().unwrap_or(hold)));
             let Some((vk, scan)) = key_by_name(name).and_then(vk_of) else {
                 eprintln!("GUNMETAL_INPUT: unknown key {name}");
                 continue;
@@ -389,8 +439,10 @@ fn parse_script(text: &str) -> VecDeque<(u64, Input)> {
             ev.push((t + hold, Input::Key { vk, scan, down: false, repeat: false }));
         }
     }
-    ev.sort_by_key(|e| e.0);
-    ev.into()
+    // stable: events at the same time keep the script's order
+    ms.sort_by_key(|e| e.0);
+    ticks.sort_by_key(|e| e.0);
+    Script { ms: ms.into(), ticks: ticks.into() }
 }
 
 const FN: [KeyCode; 12] = [
