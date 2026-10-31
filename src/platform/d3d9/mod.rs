@@ -15,6 +15,7 @@
 
 pub mod device;
 pub mod ex;
+pub mod queue;
 pub mod resources;
 pub mod shot;
 pub mod types;
