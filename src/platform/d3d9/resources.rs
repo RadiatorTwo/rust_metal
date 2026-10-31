@@ -130,10 +130,37 @@ pub fn end_lock(this: u32, level: u32) -> bool {
     if l.size == 0 {
         return true;
     }
-    if l.flags & D3DLOCK_READONLY == 0 {
+    if l.flags & D3DLOCK_READONLY == 0 && l.host != 0 {
         unsafe { std::slice::from_raw_parts_mut(l.host as *mut u8, l.size) }.copy_from_slice(mem().slice(l.guest, l.size));
     }
     true
+}
+
+/// Whether a buffer lock of [lo, hi) with `flags` must lock the host's buffer (and so wait for
+/// the D3D9 worker): not when it discards, or when the guest copy already holds every byte of
+/// the range (`kept`, sorted and disjoint), which then needs nothing from the host.
+pub fn lock_needs_host(kept: &[(u64, u64)], lo: u64, hi: u64, flags: u32) -> bool {
+    if flags & D3DLOCK_DISCARD != 0 {
+        return false;
+    }
+    let mut at = lo;
+    for &(a, b) in kept {
+        if a <= at && b > at {
+            at = b;
+        }
+    }
+    at < hi
+}
+
+/// The kept guest ranges of a buffer (`lock_needs_host`).
+fn kept_ranges(this: u32) -> Vec<(u64, u64)> {
+    lock(&LOCKS).as_ref().and_then(|m| m.get(&(this, 0))).and_then(|l| l.kept.clone()).unwrap_or_default()
+}
+
+/// The latest open lock of (`this`, `level`): (host pointer, 0 for a lock the host has not
+/// seen yet; guest address; size; flags).
+fn top_lock(this: u32, level: u32) -> Option<(usize, u32, usize, u32)> {
+    lock(&LOCKS).as_ref().and_then(|m| m.get(&(this, level))).and_then(|l| l.open.last()).map(|l| (l.host, l.guest, l.size, l.flags))
 }
 
 /// Something other than our Unlock wrote the host's resource: a kept guest copy is stale.
@@ -703,8 +730,6 @@ fn buffer_size(p: *mut c_void, v: &IDirect3DVertexBuffer9_Vtbl) -> Result<u32, w
 /// Lock(offset, size, out pointer, flags): size 0 is the rest of the buffer. The guest buffer
 /// covers the whole buffer and is kept between locks; the game gets the lock's offset in it.
 fn buffer_lock(c: &mut Cpu) -> u32 {
-    // not recorded yet: the calls recorded before go first
-    super::queue::flush();
     let (p, v) = buf(c);
     let (this, offset, size, out, flags) = (arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4));
     let total = match buffer_size(p, v) {
@@ -719,6 +744,15 @@ fn buffer_lock(c: &mut Cpu) -> u32 {
         log!("warn: buffer Lock({offset:#x}, {size:#x}) past its end {total:#x} (D3DERR_INVALIDCALL)");
         return D3DERR_INVALIDCALL;
     }
+    // with the D3D9 worker: the guest copy answers, the host's buffer is written at the Unlock
+    let (lo, hi) = (offset as u64, offset as u64 + size as u64);
+    if super::queue::global().is_some() && !lock_needs_host(&kept_ranges(this), lo, hi, flags) {
+        let guest = com::shadow(this, 0, total) + offset;
+        begin_kept_lock(this, 0, guest, std::ptr::null_mut(), size as usize, flags);
+        mem().wr32(out, guest);
+        return 0;
+    }
+    super::queue::flush();
     let mut data: *mut c_void = std::ptr::null_mut();
     let r = unsafe { (v.Lock)(p, offset, size, &mut data, flags) };
     if r.is_err() {
@@ -731,10 +765,32 @@ fn buffer_lock(c: &mut Cpu) -> u32 {
 }
 
 fn buffer_unlock(c: &mut Cpu) -> u32 {
-    // not recorded yet: the calls recorded before go first
-    super::queue::flush();
     let (p, v) = buf(c);
-    end_lock(arg(c, 0), 0);
+    let this = arg(c, 0);
+    // a lock the host has not seen: the bytes go to the worker, which writes them
+    if let (Some(q), Some((0, guest, size, flags))) = (super::queue::global(), top_lock(this, 0)) {
+        end_lock(this, 0);
+        if flags & D3DLOCK_READONLY != 0 || size == 0 {
+            return 0;
+        }
+        let offset = guest - com::shadow(this, 0, 0);
+        let bytes: Box<[u8]> = mem().slice(guest, size).into();
+        let (p, lock_fn, unlock_fn) = (p as usize, v.Lock, v.Unlock);
+        q.record(Box::new(move || unsafe {
+            let p = p as *mut c_void;
+            let mut data: *mut c_void = std::ptr::null_mut();
+            let r = lock_fn(p, offset, size as u32, &mut data, flags & !D3DLOCK_READONLY);
+            if r.is_err() || data.is_null() {
+                log!("d3d9 worker: buffer Lock({offset:#x}, {size:#x}) -> {:#x}", r.0);
+                return;
+            }
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), data as *mut u8, size);
+            let _ = unlock_fn(p);
+        }));
+        return 0;
+    }
+    super::queue::flush();
+    end_lock(this, 0);
     hr(unsafe { (v.Unlock)(p) })
 }
 

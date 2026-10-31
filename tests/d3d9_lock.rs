@@ -311,3 +311,20 @@ fn texture_rect_locks_share_level() {
     forget(t);
     com::release(t, 0);
 }
+
+/// Whether a buffer lock must reach the host's buffer (and so wait for the D3D9 worker): not
+/// when the game discards or promises not to overwrite, or the range is in the kept guest copy.
+#[test]
+fn lock_needs_host_cases() {
+    use rust_metal::platform::d3d9::resources::lock_needs_host;
+    let kept = [(0u64, 4096u64)];
+    assert!(!lock_needs_host(&kept, 0, 1024, 0));
+    assert!(lock_needs_host(&kept, 4000, 5000, 0));
+    // no-overwrite of bytes the guest copy never held: they come from the host first, or the
+    // Unlock would write the guest's zeros over them
+    assert!(lock_needs_host(&kept, 8192, 9000, D3DLOCK_NOOVERWRITE));
+    assert!(!lock_needs_host(&kept, 1024, 2048, D3DLOCK_NOOVERWRITE));
+    assert!(!lock_needs_host(&kept, 8192, 9000, D3DLOCK_DISCARD));
+    assert!(lock_needs_host(&kept, 8192, 9000, D3DLOCK_READONLY));
+    assert!(lock_needs_host(&[], 0, 16, 0));
+}
