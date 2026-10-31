@@ -15,8 +15,10 @@
 //! - every guest thread's last import (name and return address) and the chain of its stack
 //!   from there: the other threads are stopped in imports while this one has the turn.
 //!
-//! Each guest thread registers itself (`register`); imports note themselves per thread
-//! (`note_import`, a few relaxed stores).
+//! Each guest thread registers itself (`register`, a free slot of 64, freed by `unregister`);
+//! imports note themselves per thread (`note_import`: the slot from a thread-local, a few
+//! relaxed stores; unregistered host threads note nothing). Every guest read checks that the
+//! memory is there (`guest_readable`), so a bad pointer does not take the report down.
 
 use super::{log, mem, thunk_name};
 use crate::rt::{Cpu, EBP, ECX, ESP, call_original};
@@ -62,19 +64,40 @@ impl Slot {
 const SLOTS: usize = 64;
 static THREADS: [Slot; SLOTS] = [const { Slot::new() }; SLOTS];
 
-fn slot() -> &'static Slot {
-    &THREADS[super::kernel32::thread_id() as usize % SLOTS]
+thread_local! {
+    /// The calling thread's slot (None: a host thread that did not register, e.g. a host-event
+    /// forwarder: its imports are not noted, so it never overwrites a guest thread's).
+    static MINE: std::cell::Cell<Option<&'static Slot>> = const { std::cell::Cell::new(None) };
+}
+
+/// The calling thread's slot, if it registered.
+fn slot() -> Option<&'static Slot> {
+    MINE.with(|m| m.get())
 }
 
 /// The calling host thread runs guest code from now on: as `kind` from `start`, with its
-/// thread information block at `tib`.
+/// thread information block at `tib`. It takes a free slot (the first whose tid is 0); when
+/// all 64 are taken it is not reported.
 pub fn register(kind: Kind, start: u32, tib: u32) {
-    let s = slot();
-    s.tid.store(super::kernel32::thread_id(), Ordering::Relaxed);
+    let tid = super::kernel32::thread_id();
+    let Some(s) = THREADS.iter().find(|s| s.tid.compare_exchange(0, tid, Ordering::Relaxed, Ordering::Relaxed).is_ok()) else {
+        return;
+    };
     s.kind.store(kind as u32, Ordering::Relaxed);
     s.start.store(start, Ordering::Relaxed);
     s.tib.store(tib, Ordering::Relaxed);
     s.import.store(0, Ordering::Relaxed);
+    MINE.with(|m| m.set(Some(s)));
+}
+
+/// The calling thread has finished running guest code: its slot is free again.
+pub fn unregister() {
+    if let Some(s) = MINE.with(|m| m.take()) {
+        s.kind.store(0, Ordering::Relaxed);
+        s.import.store(0, Ordering::Relaxed);
+        s.tib.store(0, Ordering::Relaxed);
+        s.tid.store(0, Ordering::Release);
+    }
 }
 
 /// The stacks [lo, hi) of the guest threads other than the main thread.
@@ -91,7 +114,7 @@ pub fn thread_stacks() -> Vec<(u32, u32)> {
 
 /// The calling thread calls import `k` (its return address on the guest stack).
 pub fn note_import(c: &Cpu, k: usize) {
-    let s = slot();
+    let Some(s) = slot() else { return };
     s.import.store(k as u32 + 1, Ordering::Relaxed);
     s.ret.store(mem().rd32(c.r[ESP]), Ordering::Relaxed);
     s.esp.store(c.r[ESP], Ordering::Relaxed);
@@ -167,7 +190,7 @@ fn stack_report(esp: u32, ebp: u32, tib: u32) -> Vec<String> {
     if !(lo..hi).contains(&esp) {
         return vec![format!("    (esp {esp:#x} outside its stack {lo:#x}..{hi:#x})")];
     }
-    let rd = |a: u32| (a >= lo && a.checked_add(4).is_some_and(|e| e <= hi)).then(|| m.rd32(a));
+    let rd = |a: u32| (a >= lo && a.checked_add(4).is_some_and(|e| e <= hi) && super::guest_readable(a, 4)).then(|| m.rd32(a));
     let rd8 = |a: u32| TEXT.contains(&a).then(|| m.rd8(a));
     let mut out = vec![format!("    esp {esp:#x} ebp {ebp:#x}, stack {lo:#x}..{hi:#x}")];
     let chain = ebp_chain(&rd, ebp, lo, hi, 24);
@@ -188,26 +211,75 @@ fn thread_line(s: &Slot) -> String {
     format!("thread {} ({kind}, start {})", s.tid.load(Ordering::Relaxed), crate::image::named(s.start.load(Ordering::Relaxed)))
 }
 
+/// The game's step of its main loop (WinMain 0x57a9b0): false makes WinMain send WM_CLOSE
+/// and shut down (0x45c430).
+pub const FRAME_STEP: u32 = 0x45c770;
+/// The loader thread's state for the main thread (thiscall): 1 still loading, 2 loaded,
+/// 3/5 failed, 6 unknown state.
+pub const LOADER_POLL: u32 = 0x4eacf0;
+/// WinMain's shutdown (after its loop).
+pub const SHUTDOWN: u32 = 0x45c430;
+/// The game's window procedure (stdcall hwnd, msg, wparam, lparam).
+pub const WND_PROC: u32 = 0x57ae70;
+/// Starts the loader thread 0x4eadf0 (thiscall, 5 arguments).
+pub const LOADER_START: u32 = 0x4eac60;
+
+pub fn wnd_proc(c: &mut Cpu) {
+    let msg = mem().rd32(c.r[ESP] + 8);
+    if matches!(msg, 0x2 | 0x10 | 0x12 | 0x16) {
+        log!("game: window message {msg:#x} at {} ms (from {:#x})", super::kernel32::ms_since_start(), super::LAST_CALL.load(Ordering::Relaxed));
+    }
+    call_original(c, WND_PROC);
+}
+
+pub fn loader_start(c: &mut Cpu) {
+    log!("game: loader thread started at {} ms", super::kernel32::ms_since_start());
+    call_original(c, LOADER_START);
+}
+
+pub fn frame_step(c: &mut Cpu) {
+    call_original(c, FRAME_STEP);
+    if c.r[crate::rt::EAX] & 0xff == 0 {
+        log!("game: the main loop's step 0x45c770 returned false at {} ms: the game quits", super::kernel32::ms_since_start());
+    }
+}
+
+pub fn loader_poll(c: &mut Cpu) {
+    call_original(c, LOADER_POLL);
+    let r = c.r[crate::rt::EAX];
+    if r >= 2 {
+        log!("game: the loader thread's state {r} at {} ms", super::kernel32::ms_since_start());
+    }
+}
+
+pub fn shutdown(c: &mut Cpu) {
+    log!("game: shutdown (0x45c430) at {} ms", super::kernel32::ms_since_start());
+    call_original(c, SHUTDOWN);
+}
+
 /// __amsg_exit(code): the report, then the original (its message box and exit(255)).
 pub fn amsg_exit(c: &mut Cpu) {
     let m = mem();
-    let code = m.rd32(c.r[ESP] + 4);
+    // a dword of guest memory that may not be there (ecx is arbitrary for most codes)
+    let rd = |a: u32| super::guest_readable(a, 4).then(|| m.rd32(a));
+    let code = c.r[ESP].checked_add(4).and_then(rd).unwrap_or(u32::MAX);
     let what = if code == 25 { " pure virtual function call" } else { "" };
     let me = slot();
-    log!("fatal: the C runtime's error R60{code:02}{what} (__amsg_exit({code})) on {}", thread_line(me));
+    let who = me.map_or("an unregistered host thread".to_string(), thread_line);
+    log!("fatal: the C runtime's error R60{code:02}{what} (__amsg_exit({code})) on {who}");
     let this = c.r[ECX];
-    let vt = if this >= 0x1_0000 { m.rd32(this) } else { 0 };
-    log!("  ecx (the object, if a virtual call) {this:#x}, its first dword (vtable) {vt:#x}");
+    let vt = rd(this).map_or("(not readable)".to_string(), |v| format!("{v:#x}"));
+    log!("  ecx (the object, if a virtual call) {this:#x}, its first dword (vtable) {vt}");
     log!("  last import call returned to {:#x}", super::LAST_CALL.load(Ordering::Relaxed));
     for line in stack_report(c.r[ESP], c.r[EBP], c.fs_base) {
         log!("{line}");
     }
-    let mine = me.tid.load(Ordering::Relaxed);
+    let mine = me.map(|s| s as *const Slot);
     for s in THREADS.iter().filter(|s| s.kind.load(Ordering::Relaxed) != 0) {
         let k = s.import.load(Ordering::Relaxed);
         let import = if k == 0 { "none".to_string() } else { thunk_name(k as usize - 1) };
         log!("  {}: last import {import}, returning to {}", thread_line(s), function_of(s.ret.load(Ordering::Relaxed)));
-        if s.tid.load(Ordering::Relaxed) != mine && k != 0 {
+        if mine != Some(s as *const Slot) && k != 0 {
             for line in stack_report(s.esp.load(Ordering::Relaxed), s.ebp.load(Ordering::Relaxed), s.tib.load(Ordering::Relaxed)) {
                 log!("{line}");
             }

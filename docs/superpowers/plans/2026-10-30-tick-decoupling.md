@@ -233,6 +233,12 @@ IDirect3DDevice9::SetLight and SetTransform and DirectSound, and writes ~825 pag
 
 ## 5. The R6025 crash
 
+**Resolved (2026-10-31):** not a race. It is the game's own bug when it is closed while a
+mission starts (router destructor order, see PLAN.md and `src/platform/router.rs`); the scripted
+runs closed at 62 s when the mission start ran late. Fixed by skipping removals through
+containers the dying router already deleted. Nothing here blocks design (a) any more.
+The analysis below was the hypothesis before that.
+
 "R6025 pure virtual function call" is _purecall through `__amsg_exit(25)`: a virtual method was
 called on an object that is being built or destroyed, the classic race between two threads over
 an object's lifetime. At mission load several guest threads are alive: the loader thread

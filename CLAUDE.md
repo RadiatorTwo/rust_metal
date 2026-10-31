@@ -120,7 +120,12 @@ menu offers every display mode, not only up to 1600x1200; the monitor and the ga
 the back buffer's own shape: Hor+ widescreen in missions, the 4:3 menus in the middle), `crash.rs`
 (the C runtime's fatal errors: `__amsg_exit` 0x588d97 hooked; R6025 and the others log the thread,
 `ecx` and its vtable, the ebp chain and a stack scan for return addresses, and every guest thread's
-last import with its stack, then exit as the original), `frames.rs` (`GUNMETAL_FRAMES=<file>`: a
+last import with its stack, then exit as the original; also logs the main loop's step returning
+false, WM_CLOSE/WM_DESTROY, the loader thread's state and game_shutdown as "game: ..."),
+`router.rs` (the world's id router; fixes the game's own R6025 when it is closed while a mission
+starts: the router's destructor deletes its containers in tree order and later objects remove
+ids through containers already deleted; such a removal is skipped. `GUNMETAL_TRACE_ROUTER=1`
+logs the deletions), `frames.rs` (`GUNMETAL_FRAMES=<file>`: a
 line per picture, 2 s summaries, findings for the tick on a second thread at the exit), `hud.rs`
 (the HUD laid out for a screen 768 pixels high and scaled up: as big as at 1024x768), `fps.rs` (the
 frame rate: missions are uncapped with 40 ms logic ticks; the camera, model nodes, particles and
@@ -254,7 +259,7 @@ How the game starts (`GUNMETAL_TRACE_API=1` shows every import call):
 Env: `GUNMETAL_TRACE_API` (imports with arguments), `GUNMETAL_TRACE_REG`, `GUNMETAL_TRACE_MSG`,
 `GUNMETAL_INPUT` (scripted input, see `window.rs`; real keyboard and mouse ignored),
 `GUNMETAL_WINDOW=WxH`, `GUNMETAL_MONITOR=n`, `GUNMETAL_WATCH` (where the game is, every 2 s),
-`GUNMETAL_PROF`, `GUNMETAL_SAMPLE`, `GUNMETAL_STEPS`, `GUNMETAL_NO_MF` (music off),
+`GUNMETAL_PROF`, `GUNMETAL_SAMPLE`, `GUNMETAL_STEPS`, `GUNMETAL_TRACE_ROUTER`, `GUNMETAL_NO_MF` (music off),
 `GUNMETAL_COUNT=<file>`, `GUNMETAL_FRAMES=<file>` (per picture: Present time, interval, time to
 produce it, ticks and their time, and where the main thread's time went: imports, the slowest one,
 waits for the turn and who held it, page faults, CPU time; summaries every 2 s and at ExitProcess;

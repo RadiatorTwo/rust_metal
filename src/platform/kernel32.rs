@@ -798,6 +798,7 @@ fn create_thread(c: &mut Cpu) -> u32 {
             super::crash::register(super::crash::Kind::Thread, start, tc.fs_base);
             super::frames::thread_start(start);
             let r = guest_call(&mut tc, start, &[param]);
+            super::crash::unregister();
             let code = if tc.stop != 0 { EXIT_CODE.get() } else { r };
             let mut g = objects();
             for o in g.map.values_mut() {

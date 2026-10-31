@@ -480,26 +480,9 @@ fn get_texture(c: &mut Cpu) -> u32 {
 pass!(draw_primitive, DrawPrimitive, |c| (D3DPRIMITIVETYPE(arg(c, 1) as i32), arg(c, 2), arg(c, 3)));
 pass!(draw_indexed_primitive, DrawIndexedPrimitive, |c| (D3DPRIMITIVETYPE(arg(c, 1) as i32), arg(c, 2) as i32, arg(c, 3), arg(c, 4), arg(c, 5), arg(c, 6)));
 
-/// Whether guest bytes [a, a + n) are committed memory D3D9 can read (the game's *UP arrays
-/// are on its heap or stack, so this holds; a bad pointer is refused instead of faulting
-/// inside d3d9.dll).
-fn guest_readable(a: u32, n: u32) -> bool {
-    use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEMORY_BASIC_INFORMATION, VirtualQuery};
-    let (mut at, end) = (a as u64, a as u64 + n as u64);
-    while at < end {
-        let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
-        let p = unsafe { mem().base.add(at as usize) };
-        if unsafe { VirtualQuery(p as _, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } == 0 || mbi.State != MEM_COMMIT {
-            return false;
-        }
-        at = (mbi.BaseAddress as u64 - mem().base as u64) + mbi.RegionSize as u64;
-    }
-    true
-}
-
 /// A *UP draw's arrays not all in guest memory: logged, D3DERR_INVALIDCALL.
 fn up_refused(what: &str, a: u32, n: u32) -> bool {
-    if guest_readable(a, n) {
+    if super::super::guest_readable(a, n) {
         return false;
     }
     log!("warn: {what}: {n} bytes at {a:#x} not in guest memory (D3DERR_INVALIDCALL)");

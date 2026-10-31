@@ -27,6 +27,7 @@ pub mod mf;
 #[cfg(windows)]
 pub mod music;
 pub mod ole32;
+pub mod router;
 pub mod sample;
 pub mod user32;
 pub mod video;
@@ -538,6 +539,33 @@ fn on_event(c: &mut Cpu, e: Event) {
 /// Return address of the last import call, for crash reports.
 static LAST_CALL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// Whether guest bytes [a, a + n) are committed, readable memory (not PAGE_NOACCESS or a
+/// guard page): for host code that reads guest pointers it cannot trust (D3D9's *UP arrays,
+/// crash reports), so a bad pointer is refused instead of faulting.
+#[cfg(windows)]
+pub fn guest_readable(a: u32, n: u32) -> bool {
+    use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_NOACCESS, VirtualQuery};
+    let (mut at, end) = (a as u64, a as u64 + n as u64);
+    while at < end {
+        let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        let p = unsafe { mem().base.add(at as usize) };
+        if unsafe { VirtualQuery(p as _, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } == 0
+            || mbi.State != MEM_COMMIT
+            || mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD) != 0
+        {
+            return false;
+        }
+        at = (mbi.BaseAddress as u64 - mem().base as u64) + mbi.RegionSize as u64;
+    }
+    true
+}
+
+/// Elsewhere unknown: nothing counts as readable.
+#[cfg(not(windows))]
+pub fn guest_readable(_: u32, _: u32) -> bool {
+    false
+}
+
 /// Report an access violation in guest memory (a bad game pointer) before the process dies.
 fn report_fault(kind: &str, a: usize, pc: usize) {
     let base = mem().base as usize;
@@ -807,11 +835,16 @@ fn find_import(dll: &str, name: &str) -> Option<&'static Import> {
 
 /// Game functions replaced by our own (`jit::compile`).
 pub const HOOKS: &[(u32, crate::rt::Hook)] = &{
-    const N: usize = 3 + fps::HOOKS.len() + video::HOOKS.len() + hud::HOOKS.len();
+    const N: usize = 8 + fps::HOOKS.len() + video::HOOKS.len() + hud::HOOKS.len() + router::HOOKS.len();
     let mut h: [(u32, crate::rt::Hook); N] = [(crt::FTOL, crt::ftol); N];
     h[1] = (crt::GAME_WARNING, crt::game_warning);
     h[2] = (crash::AMSG_EXIT, crash::amsg_exit);
-    let mut n = 3;
+    h[3] = (crash::FRAME_STEP, crash::frame_step);
+    h[4] = (crash::LOADER_POLL, crash::loader_poll);
+    h[5] = (crash::SHUTDOWN, crash::shutdown);
+    h[6] = (crash::WND_PROC, crash::wnd_proc);
+    h[7] = (crash::LOADER_START, crash::loader_start);
+    let mut n = 8;
     let mut i = 0;
     while i < fps::HOOKS.len() {
         h[n] = fps::HOOKS[i];
@@ -827,6 +860,12 @@ pub const HOOKS: &[(u32, crate::rt::Hook)] = &{
     let mut i = 0;
     while i < hud::HOOKS.len() {
         h[n] = hud::HOOKS[i];
+        n += 1;
+        i += 1;
+    }
+    let mut i = 0;
+    while i < router::HOOKS.len() {
+        h[n] = router::HOOKS[i];
         n += 1;
         i += 1;
     }

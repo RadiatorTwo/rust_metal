@@ -189,22 +189,22 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
       (6.5 -> 5.4 ms a picture). Next: an inline target check at indirect call sites (or the
       table read inline in generated code, skipping the host call), then fix 2 (flags around
       calls) and 3 (static x87 TOP)
-- [ ] R6025 "pure virtual function call" at mission load (rare: 1 in 10 cold starts to
-      mission 1, 2026-10-30, caught by `crash.rs`; earlier 1 in 9). It is the main thread,
-      not a guest thread: game_frame's teardown 0x45c2b0 -> 0x534860 deletes the front end's
-      world (0x413cb0, proj+0x6a8); its object tree (0x503140/0x5095a0) deletes a 512-slot
-      container (dtor 0x45bf40), whose items (dtor 0x41db70) unregister their id ([+0x1f8])
-      from the router (proj vtable +0x14 -> +0x2c, method +0x44 = 0x507890). The router finds
-      the handler for the id's top byte in its tree at +0x9084 and calls its +0xc: that
-      handler (ecx 0x2343c3f0) already has the abstract base vtable 0x5e45fc, i.e. it was
-      destroyed and is still registered. Meanwhile the loader thread 0x4eadf0 had finished
-      (0x4e7120 done, waiting out its 1 s in Sleep(100)); stream threads were in waits. Likely
-      cause: the loader thread's objects and the front end's share the router, and how their
-      registrations interleave (turns at imports and loop heads) decides whether a handler
-      is unregistered before the items using it. Next: log the router's registrations and
-      removals per thread (and the handler's destruction) in the failing order, then make
-      that part of loading not interleave (or remove the stale entry when a handler dies).
-      Needed before design (a) of docs/superpowers/plans/2026-10-30-tick-decoupling.md
+- [x] R6025 "pure virtual function call" (2026-10-31, fixed in `router.rs`): not a thread
+      race and not our emulation but a latent bug of the game, hit when it is closed
+      (WM_CLOSE: Alt+F4 on the original, our window's close button, a script's `close`) while a
+      mission is starting (after the briefing's "BEREIT", before the mission music; closing
+      at 47 s in the cold-start script crashes every time without the fix). WinMain's loop
+      ends, game_shutdown 0x45c430 deletes the world (0x413cb0) and its router's destructor
+      (0x503140) deletes the eleven id containers in tree post-order; type-2 objects (unit
+      dtor 0x41db70) then remove a type-5 id they hold ([+0x1f8], also 0x5ffffff) through the
+      router, whose type-5 container was deleted first (vtable already 0x5e45fc): _purecall.
+      In a running mission the router's lists (0x503440) remove those objects earlier.
+      The fix: while a router is being destroyed, removing an id whose container it already
+      deleted is skipped (returns "not found"; logged as "game: id ... skipped"). The 1-in-10
+      catches came from scripts closing at 62 s when the mission start ran late. Also: the
+      main loop's step returning false, WM_CLOSE/WM_DESTROY, the loader thread's state and
+      game_shutdown are logged ("game: ..."); `GUNMETAL_TRACE_ROUTER=1` logs the router's
+      handler deletions. Report: `.superpowers/perf/task-r6025-report.md`
 - [ ] Resolution, still open: the door transition is stretched to a wider back buffer; the
       menu background's scrolling text shows faintly beside the 4:3 middle; the radar is
       wider than round (it follows the screen's width); our own resolution setting (the

@@ -264,3 +264,26 @@
 0x5492a0 world_to_screen      a point through the camera to screen pixels (render_width / 2 ...)
 0x549470 world_to_screen2     the same with the screen size at 0x6f99b0/0x6f99b4
 0x6f99b0 screen_size          the screen's width and height (0x6f99b4)
+
+# Main loop, loader thread, world teardown and the id router (router.rs, crash.rs; R6025)
+0x45c770 game_step            WinMain's loop step (after msg_pump); false: SendMessageA(WM_CLOSE) and the loop ends
+0x45c430 game_shutdown        after WinMain's loop: window callbacks off, video_end, 0x45c2b0 (world teardown), deletes the game object 0x72a458
+0x45c2b0 game_teardown?       ... 0x534ab0 -> game vt+0x24 = 0x534860
+0x534860 game_world_delete?   thiscall on the game object (vtable 0x5eaedc, [0x72a458]; vt+0x14 = current world [+0x6a8]): stream stop, Sleep(1000), world dtor
+0x413cb0 world_dtor           removes id [0x76d4b0] through the router, 0x503440, then the router dtor on [+0x2c]
+0x45a3c0 world_handlers_make? makes the eleven handlers (id containers) and registers them with the router (0x5053b0)
+0x5053b0 router_register      thiscall(router, handler): tree node keyed by handler vt+0x20 (the id's top byte); a key already there is refused (assert)
+0x507890 router_remove        thiscall(router, id) -> al: the handler for the id's top byte (tree at +0x9084), its vt+0xc(id); false without one. Hooked (router.rs)
+0x503440 router_clear_lists   removes every id on the router's lists (+0x9050.. +0x906c) through vt+0x44
+0x503140 router_dtor          walks the tree post-order (0x5095a0) deleting each handler (0x503040), then frees it. Hooked (router.rs)
+0x503040 router_drop_node     thiscall(router, node): frees the node's list, handler vt+0x34 (deletes it). Hooked (router.rs)
+0x5094b0 tree_find            (node, key, out): the BST lookup (left +0xc smaller keys, right +0x10)
+0x5093f0 tree_insert          (node, key, value) -> al: false when the key is there
+0x5095a0 tree_walk            post-order walk with a callback
+0x45bf40 id_container_dtor    512-slot container of objects (type 2, vtable 0x5e56e8): deletes each, then vtable = abstract handler 0x5e45fc
+0x4a9dd0 id_container_remove  vt+0xc of 0x5e56e8: removes (deletes) slot id & 0xffff
+0x41db70 unit_dtor?           object of type 2 (vtable 0x5e4bc8, owner +0x174): ... member at +0x1d0 removes its id [+0x1f8] (0x4374b0)
+0x4374b0 id_ref_release       thiscall(member): current world's router -> router_remove([+0x28])
+0x4eac60 loader_start         thiscall(5 args): CreateThread(0x4eadf0), state 0x7286b8 = 0
+0x4eacf0 loader_poll          thiscall -> 1 loading, 2 loaded (CloseHandle), 3/5 failed, 6 bad state
+0x4eadf0 loader_thread        0x4e7120 (the load), then Sleep(100) until 1 s has passed; state 1/2/3

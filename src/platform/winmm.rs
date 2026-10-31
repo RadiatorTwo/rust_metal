@@ -52,6 +52,7 @@ fn time_set_event(c: &mut Cpu) -> u32 {
                 }
                 n += 1;
             }
+            super::crash::unregister();
         })
         .expect("cannot start a timer thread");
     id
