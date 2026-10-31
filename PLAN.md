@@ -214,6 +214,18 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
       each, guest time 3.08-3.19 against 2.81-3.01 ms. The old check runs in XMM registers
       beside the arithmetic, off the critical path; the integer one takes general registers
       that hold the guest's. Fewer instructions is not the measure here: A/B runs are.
+      2026-11-01: measured with CPU counters (xperf PMC, elevated): the main thread runs at IPC
+      2.46 with few misses (per 1000 instructions: ICMiss 1.4, branch mispredicts 0.7, L1D 7.9),
+      ~48 million host instructions a picture: instruction count is the limit. Upper bound for
+      the x87 24-bit rounding (left out, wrong on purpose; A/B): 207 -> 231 fps.
+      - Direct3D 9 on a worker thread (`d3d9/queue.rs`, plan
+        docs/superpowers/plans/2026-10-31-d3d9-thread.md): A/B 3 rounds, 204-212 -> 233-237 fps
+        (+13 %), imports per picture without a tick 1.09-1.13 -> 0.73 ms, p99 of all pictures
+        9.7-10.0 -> 9.0-9.2 ms; logic per tick unchanged. Tick fingerprints: camera, player and
+        game time identical; objects and units differ as much as between two runs without it.
+        What is left of the imports is the per-call cost (~5000 imports a picture, ~0.15 us each:
+        thunk lookup, recording with an allocation per call). To be confirmed by hand: Alt+Enter
+        both ways, the picture's black bars, Alt+Tab, Win+L in a mission.
       Found on the way: a device loss in a mission (TestCooperativeLevel lost, not scripted)
       was followed by a null read in 0x47a6b0 (from 0x47a07a): to be looked at.
 - [ ] Frame rate: even frame times (docs/superpowers/plans/2026-10-30-tick-decoupling.md,

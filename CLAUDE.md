@@ -138,7 +138,17 @@ window (scripted runs, `GUNMETAL_INPUT`, answer it at once with its first button
 an implementation stop the run with "import X is not implemented yet" when called (listed at start:
 CreateProcessA, EnumSystemLocalesA, file mappings, CreateFileW).
 
-Direct3D 9 (`d3d9/`): with `GUNMETAL_D3D9EX=1` a 9Ex device with the flip model (`ex.rs`; off by default:
+Direct3D 9 (`d3d9/`): the device's calls run on a worker thread (`queue.rs`, on by default;
+registry `D3DThread` = 0 or `GUNMETAL_D3D_THREAD=0` turn it off, always off with 9Ex): the
+methods that set state or draw, Present, SetGammaRamp (an unchanged ramp skipped), Query Issue
+and buffer Unlock are recorded with copies of their pointed-to data (`device::copy_in`) and
+return D3D_OK at once, keeping the turn; batches of 256 go to the worker, and Present waits
+only for the picture before it. Get*State come from a cache (`state.rs`, refilled lazily after
+CreateDevice, Reset and state blocks), TestCooperativeLevel is the worker's answer after its
+last Present, buffer Locks are answered from the kept guest copy (the host only for a buffer
+ProcessVertices made stale). Every other Direct3D method first waits for the worker
+(`queue::flush`, in `on_event`) and runs on the calling thread; so do ExitProcess and Release.
+Measured (A/B, 3 rounds): 204-212 -> 233-237 fps, imports per picture 1.10 -> 0.73 ms. With `GUNMETAL_D3D9EX=1` a 9Ex device with the flip model (`ex.rs`; off by default:
 RivaTuner's overlay vanished with it; plain D3D9 as described below otherwise): the game's back buffer is our render
 target (its size, format and MSAA, with our depth-stencil surface; GetBackBuffer hands it out), the
 swap chain has the game's size, 2 buffers, FLIPEX, frame latency 1; Present resolves and
@@ -275,7 +285,7 @@ them from a file, `#` comments), `GUNMETAL_RECORD=file.txt` (`record.rs`: the pl
 such items, ms outside missions and mission ticks in them: keys and mouse buttons with their
 hold, raw motion summed per tick or 50 ms as `motion@dx,dy`, `wheel@n`, focus, close; F11 writes a
 mark comment and `file.txt.<ms>.png`),
-`GUNMETAL_WINDOW=WxH`, `GUNMETAL_MONITOR=n`, `GUNMETAL_WATCH` (where the game is, every 2 s),
+`GUNMETAL_D3D_THREAD=0` (Direct3D on the game's thread), `GUNMETAL_WINDOW=WxH`, `GUNMETAL_MONITOR=n`, `GUNMETAL_WATCH` (where the game is, every 2 s),
 `GUNMETAL_PROF`, `GUNMETAL_SAMPLE`, `GUNMETAL_STEPS`, `GUNMETAL_TRACE_ROUTER`, `GUNMETAL_TRACE_LIFE`, `GUNMETAL_NO_MF` (music off),
 `GUNMETAL_COUNT=<file>`, `GUNMETAL_FRAMES=<file>` (per picture: Present time, interval, time to
 produce it, ticks and their time, and where the main thread's time went: imports, the slowest one,
