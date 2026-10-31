@@ -248,6 +248,11 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
       off changes +0x150..+0x158 of 22 objects of class 0x5e6d88 from tick 3 on (deterministic
       in each setting): the logic reads something the smoothing changes. Seen once in ~15 runs:
       a null read in 0x504360's list walk (llist pCurrent) while the mission loaded.
+- [x] Smooth pictures flickered (2026-10-31, seen by the user: grass, enemies, rhinos jumped to
+      another place and back with a ghost): places at one address were matched by their draw
+      count, which changes with what is in view; now by mutual nearest place (`fps::partner`).
+      Confirmed gone by the user with the recording `rhinos.txt` (`GUNMETAL_INPUT=@rhinos.txt`,
+      loads a saved game)
 - [ ] Smooth pictures, left at the tick (small): water (0x530da0, its waves if they move),
       the radar's dots (0x444035, 0x4440e6), a trail's texture scroll (+0x98); look at it
       in play (does anything still shake?)
