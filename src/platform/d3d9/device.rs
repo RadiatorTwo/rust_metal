@@ -113,7 +113,16 @@ fn show_cursor(c: &mut Cpu) -> u32 {
 /// device back after a loss. A simulated loss (`simulate_loss`) ends here.
 fn reset(c: &mut Cpu) -> u32 {
     let (p, v) = dv(c);
-    let r = hr(super::with_present_params(arg(c, 1), super::device_no_16bit_modes(), "Reset", |params| unsafe { (v.Reset)(p, params) }));
+    let r = hr(super::with_present_params(arg(c, 1), super::device_no_16bit_modes(), "Reset", |params| unsafe {
+        if !super::ex::on() {
+            return (v.Reset)(p, params);
+        }
+        super::ex::drop_target();
+        let asked = super::ex::host_params(params);
+        let r = (v.Reset)(p, params);
+        super::ex::game_params(params, &asked);
+        if r.is_err() { r } else { super::ex::make_target(p, params) }
+    }));
     log!("d3d9: Reset -> {r:#x}");
     if r == 0 {
         *crate::platform::lock(&SIMULATED_LOSS) = None;
@@ -209,7 +218,21 @@ fn present(c: &mut Cpu) -> u32 {
     if frames {
         crate::platform::frames::before_present();
     }
-    super::shot::before_present(p);
+    super::shot::before_present(p, super::ex::target());
+    if super::ex::on() {
+        let r = super::ex::present(p);
+        if frames {
+            crate::platform::frames::after_present();
+        }
+        if r.is_ok() {
+            let t = frames.then(std::time::Instant::now);
+            clear_back_buffer(p, v);
+            if let Some(t) = t {
+                crate::platform::frames::cleared(t.elapsed());
+            }
+        }
+        return hr(r);
+    }
     let w = arg(c, 3);
     let win = if w == 0 { HWND::default() } else { super::host_hwnd(w) };
     let target = if w == 0 { super::host_hwnd(crate::platform::user32::main_window()) } else { win };
@@ -242,8 +265,10 @@ fn clear_back_buffer(p: *mut c_void, v: &IDirect3DDevice9_Vtbl) {
         let mut desc = D3DSURFACE_DESC::default();
         let mut back: *mut c_void = std::ptr::null_mut();
         let ok = surface.GetDesc(&mut desc).is_ok()
-            && (v.GetBackBuffer)(p, 0, 0, D3DBACKBUFFER_TYPE_MONO, &mut back as *mut _ as _).is_ok()
-            && back == target;
+            && match super::ex::target() {
+                Some(t) => t == target,
+                None => (v.GetBackBuffer)(p, 0, 0, D3DBACKBUFFER_TYPE_MONO, &mut back as *mut _ as _).is_ok() && back == target,
+            };
         if !back.is_null() {
             drop(IDirect3DSurface9::from_raw(back));
         }
@@ -322,7 +347,12 @@ fn create_texture(c: &mut Cpu) -> u32 {
     let (p, v) = dv(c);
     let a = |k| arg(c, k);
     let mut t: *mut c_void = std::ptr::null_mut();
-    let r = unsafe { (v.CreateTexture)(p, a(1), a(2), a(3), a(4), D3DFORMAT(a(5)), D3DPOOL(a(6) as i32), &mut t, std::ptr::null_mut()) };
+    let pool = super::ex::pool(a(6));
+    let mut r = unsafe { (v.CreateTexture)(p, a(1), a(2), a(3), a(4), D3DFORMAT(a(5)), D3DPOOL(pool as i32), &mut t, std::ptr::null_mut()) };
+    if r.is_ok() && pool != a(6) {
+        let twin = super::ex::managed_texture(p, t, false, (a(1), a(2)), a(3), a(5));
+        r = managed_twin(&mut t, twin);
+    }
     resources::created(r, t, resources::TEXTURE, a(7), "CreateTexture")
 }
 
@@ -330,7 +360,11 @@ fn create_vertex_buffer(c: &mut Cpu) -> u32 {
     let (p, v) = dv(c);
     let a = |k| arg(c, k);
     let mut b: *mut c_void = std::ptr::null_mut();
-    let r = unsafe { (v.CreateVertexBuffer)(p, a(1), a(2), a(3), D3DPOOL(a(4) as i32), &mut b, std::ptr::null_mut()) };
+    let pool = super::ex::pool(a(4));
+    let r = unsafe { (v.CreateVertexBuffer)(p, a(1), a(2), a(3), D3DPOOL(pool as i32), &mut b, std::ptr::null_mut()) };
+    if r.is_ok() && pool != a(4) {
+        super::ex::managed_buffer(b);
+    }
     resources::created(r, b, resources::VERTEX_BUFFER, a(5), "CreateVertexBuffer")
 }
 
@@ -338,7 +372,11 @@ fn create_index_buffer(c: &mut Cpu) -> u32 {
     let (p, v) = dv(c);
     let a = |k| arg(c, k);
     let mut b: *mut c_void = std::ptr::null_mut();
-    let r = unsafe { (v.CreateIndexBuffer)(p, a(1), a(2), D3DFORMAT(a(3)), D3DPOOL(a(4) as i32), &mut b, std::ptr::null_mut()) };
+    let pool = super::ex::pool(a(4));
+    let r = unsafe { (v.CreateIndexBuffer)(p, a(1), a(2), D3DFORMAT(a(3)), D3DPOOL(pool as i32), &mut b, std::ptr::null_mut()) };
+    if r.is_ok() && pool != a(4) {
+        super::ex::managed_buffer(b);
+    }
     resources::created(r, b, resources::INDEX_BUFFER, a(5), "CreateIndexBuffer")
 }
 
@@ -387,7 +425,16 @@ fn surface(h: *mut c_void) -> u32 {
 /// GetBackBuffer(swap chain, index, type, out).
 fn get_back_buffer(c: &mut Cpu) -> u32 {
     let (sc, i, ty) = (arg(c, 1), arg(c, 2), arg(c, 3));
-    handed_out(c, arg(c, 4), "GetBackBuffer", surface, |p, v, o| unsafe { (v.GetBackBuffer)(p, sc, i, D3DBACKBUFFER_TYPE(ty as i32), o) })
+    handed_out(c, arg(c, 4), "GetBackBuffer", surface, |p, v, o| unsafe {
+        // 9Ex: the game's back buffer is ours (`ex`)
+        match super::ex::back_buffer() {
+            Some(b) => {
+                *o = b;
+                windows::core::HRESULT(0)
+            }
+            None => (v.GetBackBuffer)(p, sc, i, D3DBACKBUFFER_TYPE(ty as i32), o),
+        }
+    })
 }
 
 /// CreateCubeTexture(edge, levels, usage, format, pool, out, shared handle).
@@ -395,8 +442,22 @@ fn create_cube_texture(c: &mut Cpu) -> u32 {
     let (p, v) = dv(c);
     let a = |k| arg(c, k);
     let mut t: *mut c_void = std::ptr::null_mut();
-    let r = unsafe { (v.CreateCubeTexture)(p, a(1), a(2), a(3), D3DFORMAT(a(4)), D3DPOOL(a(5) as i32), &mut t, std::ptr::null_mut()) };
+    let pool = super::ex::pool(a(5));
+    let mut r = unsafe { (v.CreateCubeTexture)(p, a(1), a(2), a(3), D3DFORMAT(a(4)), D3DPOOL(pool as i32), &mut t, std::ptr::null_mut()) };
+    if r.is_ok() && pool != a(5) {
+        let twin = super::ex::managed_texture(p, t, true, (a(1), a(1)), a(2), a(4));
+        r = managed_twin(&mut t, twin);
+    }
     resources::created(r, t, resources::CUBE_TEXTURE, a(6), "CreateCubeTexture")
+}
+
+/// A managed texture's twin (`ex::managed_texture`) failed: the texture goes too.
+fn managed_twin(t: &mut *mut c_void, r: windows::core::HRESULT) -> windows::core::HRESULT {
+    if r.is_err() {
+        unsafe { (super::vtbl::<windows::core::IUnknown_Vtbl>(*t).Release)(*t) };
+        *t = std::ptr::null_mut();
+    }
+    r
 }
 
 /// CreateRenderTarget(w, h, format, multisample, quality, lockable, out, shared handle).

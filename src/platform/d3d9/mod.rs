@@ -14,6 +14,7 @@
 //! on 32-bit Windows (`fpu_after_create_device`).
 
 pub mod device;
+pub mod ex;
 pub mod resources;
 mod shot;
 pub mod types;
@@ -98,6 +99,9 @@ pub(crate) fn release(c: &mut Cpu) -> u32 {
 fn direct3d_create9(c: &mut Cpu) -> u32 {
     let sdk = arg(c, 0);
     log!("Direct3DCreate9({sdk}) (the game measured {} MHz)", mem().rd32(CPU_MHZ));
+    if let Some(d) = ex::create(sdk) {
+        return com::wrap(IDIRECT3D9, d);
+    }
     match unsafe { Direct3DCreate9(sdk) } {
         Some(d) => com::wrap(IDIRECT3D9, d.into_raw()),
         None => {
@@ -335,7 +339,22 @@ fn create_device(c: &mut Cpu) -> u32 {
     let what = format!("CreateDevice(adapter {adapter}, type {ty}, focus {focus:#x}, flags {flags:#x})");
     let mut dev: *mut c_void = std::ptr::null_mut();
     let r = with_present_params(pp, no_16bit, &what, |params| unsafe {
-        (v.CreateDevice)(p, adapter, D3DDEVTYPE(ty as i32), host_hwnd(focus), flags | D3DCREATE_MULTITHREADED, params, &mut dev)
+        let (ty, focus, flags) = (D3DDEVTYPE(ty as i32), host_hwnd(focus), flags | D3DCREATE_MULTITHREADED);
+        if !ex::on() {
+            return (v.CreateDevice)(p, adapter, ty, focus, flags, params, &mut dev);
+        }
+        let asked = ex::host_params(params);
+        let r = (vtbl::<IDirect3D9Ex_Vtbl>(p).CreateDeviceEx)(p, adapter, ty, focus, flags, params, std::ptr::null_mut(), &mut dev);
+        ex::game_params(params, &asked);
+        if r.is_err() {
+            return r;
+        }
+        let t = ex::make_target(dev, params);
+        if t.is_err() {
+            (vtbl::<IUnknown_Vtbl>(dev).Release)(dev);
+            dev = std::ptr::null_mut();
+        }
+        t
     });
     if r.is_err() {
         m.wr32(out, 0);

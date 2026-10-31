@@ -22,8 +22,9 @@ fn every() -> Duration {
 
 static LAST: Mutex<Option<Instant>> = Mutex::new(None);
 
-/// Before Present on the host device `dev`: write the back buffer if a picture is due.
-pub fn before_present(dev: *mut c_void) {
+/// Before Present on the host device `dev`: write the back buffer (`back`, the game's own on
+/// 9Ex; else the swap chain's) if a picture is due.
+pub fn before_present(dev: *mut c_void, back: Option<*mut c_void>) {
     let Some(path) = path() else { return };
     {
         let mut last = lock(&LAST);
@@ -35,7 +36,8 @@ pub fn before_present(dev: *mut c_void) {
     let Some(d) = (unsafe { IDirect3DDevice9::from_raw_borrowed(&dev) }) else {
         return;
     };
-    match unsafe { back_buffer(d) } {
+    let back = back.and_then(|b| unsafe { IDirect3DSurface9::from_raw_borrowed(&b) }.cloned());
+    match unsafe { back_buffer(d, back) } {
         Ok((px, w, h)) => {
             let t = kernel32::start_time().elapsed().as_millis();
             let file = path.replace("{t}", &format!("{t:06}"));
@@ -49,9 +51,12 @@ pub fn before_present(dev: *mut c_void) {
 
 /// The back buffer as 0RGB pixels: copied to system memory with GetRenderTargetData (through a
 /// render target without multisampling when the back buffer has it).
-unsafe fn back_buffer(d: &IDirect3DDevice9) -> windows::core::Result<(Vec<u32>, u32, u32)> {
+unsafe fn back_buffer(d: &IDirect3DDevice9, back: Option<IDirect3DSurface9>) -> windows::core::Result<(Vec<u32>, u32, u32)> {
     unsafe {
-        let mut bb = d.GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO)?;
+        let mut bb = match back {
+            Some(b) => b,
+            None => d.GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO)?,
+        };
         let mut desc = D3DSURFACE_DESC::default();
         bb.GetDesc(&mut desc)?;
         let (w, h) = (desc.Width, desc.Height);

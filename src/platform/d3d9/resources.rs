@@ -157,9 +157,11 @@ pub fn forget(this: u32) {
 /// IUnknown::Release of a lockable resource: at 0 its lock state goes with it.
 fn release(c: &mut Cpu) -> u32 {
     let this = arg(c, 0);
+    let host = com::host(this);
     let n = super::release(c);
     if n == 0 {
         forget(this);
+        super::ex::released(host);
     }
     n
 }
@@ -263,6 +265,10 @@ fn generate_mip_sub_levels(c: &mut Cpu) -> u32 {
 }
 
 fn get_level_desc(c: &mut Cpu) -> u32 {
+    super::ex::fix_pool_after(com::host(arg(c, 0)), arg(c, 2), || get_level_desc_host(c))
+}
+
+fn get_level_desc_host(c: &mut Cpu) -> u32 {
     let (p, v) = tex(c);
     hr(unsafe { (v.GetLevelDesc)(p, arg(c, 1), gp(arg(c, 2))) })
 }
@@ -367,7 +373,15 @@ fn lock_rect_common(
 /// IDirect3DTexture9::LockRect(level, locked rect, rect, flags).
 fn lock_rect(c: &mut Cpu) -> u32 {
     let (p, v) = tex(c);
-    let (this, level, out, rect, flags) = (arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4));
+    let (this, level, out, rect, mut flags) = (arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4));
+    // a managed texture on 9Ex: its twin in system memory (no discarding there)
+    let p = match super::ex::twin(p) {
+        Some(t) => {
+            flags &= !(D3DLOCK_DISCARD | D3DLOCK_NOOVERWRITE);
+            t
+        }
+        None => p,
+    };
     let mut desc = D3DSURFACE_DESC::default();
     let r = unsafe { (v.GetLevelDesc)(p, level, &mut desc) };
     if r.is_err() {
@@ -382,6 +396,9 @@ fn get_surface_level(c: &mut Cpu) -> u32 {
     let (p, v) = tex(c);
     let mut s: *mut c_void = std::ptr::null_mut();
     let r = unsafe { (v.GetSurfaceLevel)(p, arg(c, 1), &mut s) };
+    if r.is_ok() {
+        super::ex::surface_of(s, p, arg(c, 1), false);
+    }
     created(r, s, SURFACE, arg(c, 2), "GetSurfaceLevel")
 }
 
@@ -389,6 +406,11 @@ fn unlock_rect(c: &mut Cpu) -> u32 {
     let (p, v) = tex(c);
     let level = arg(c, 1);
     end_lock(arg(c, 0), level);
+    if let Some(t) = super::ex::twin(p) {
+        let r = unsafe { (v.UnlockRect)(t, level) };
+        super::ex::upload(p, false);
+        return hr(r);
+    }
     hr(unsafe { (v.UnlockRect)(p, level) })
 }
 
@@ -436,7 +458,7 @@ fn cube_qi(c: &mut Cpu) -> u32 {
 
 fn cube_get_level_desc(c: &mut Cpu) -> u32 {
     let (p, v) = cube(c);
-    hr(unsafe { (v.GetLevelDesc)(p, arg(c, 1), gp(arg(c, 2))) })
+    super::ex::fix_pool_after(p, arg(c, 2), || hr(unsafe { (v.GetLevelDesc)(p, arg(c, 1), gp(arg(c, 2))) }))
 }
 
 /// The guest buffer key of a cube face's level.
@@ -449,13 +471,23 @@ fn get_cube_map_surface(c: &mut Cpu) -> u32 {
     let (p, v) = cube(c);
     let mut s: *mut c_void = std::ptr::null_mut();
     let r = unsafe { (v.GetCubeMapSurface)(p, D3DCUBEMAP_FACES(arg(c, 1) as i32), arg(c, 2), &mut s) };
+    if r.is_ok() {
+        super::ex::surface_of(s, p, face_key(arg(c, 1), arg(c, 2)), true);
+    }
     created(r, s, SURFACE, arg(c, 3), "GetCubeMapSurface")
 }
 
 /// LockRect(face, level, locked rect, rect, flags).
 fn cube_lock_rect(c: &mut Cpu) -> u32 {
     let (p, v) = cube(c);
-    let (this, face, level, out, rect, flags) = (arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4), arg(c, 5));
+    let (this, face, level, out, rect, mut flags) = (arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4), arg(c, 5));
+    let p = match super::ex::twin(p) {
+        Some(t) => {
+            flags &= !(D3DLOCK_DISCARD | D3DLOCK_NOOVERWRITE);
+            t
+        }
+        None => p,
+    };
     let f = D3DCUBEMAP_FACES(face as i32);
     let mut desc = D3DSURFACE_DESC::default();
     let r = unsafe { (v.GetLevelDesc)(p, level, &mut desc) };
@@ -471,6 +503,11 @@ fn cube_unlock_rect(c: &mut Cpu) -> u32 {
     let (p, v) = cube(c);
     let (face, level) = (arg(c, 1), arg(c, 2));
     end_lock(arg(c, 0), face_key(face, level));
+    if let Some(t) = super::ex::twin(p) {
+        let r = unsafe { (v.UnlockRect)(t, D3DCUBEMAP_FACES(face as i32), level) };
+        super::ex::upload(p, true);
+        return hr(r);
+    }
     hr(unsafe { (v.UnlockRect)(p, D3DCUBEMAP_FACES(face as i32), level) })
 }
 
@@ -552,13 +589,17 @@ fn get_container(c: &mut Cpu) -> u32 {
 
 fn surface_get_desc(c: &mut Cpu) -> u32 {
     let (p, v) = surf(c);
-    hr(unsafe { (v.GetDesc)(p, gp(arg(c, 1))) })
+    super::ex::fix_pool_after(p, arg(c, 1), || hr(unsafe { (v.GetDesc)(p, gp(arg(c, 1))) }))
 }
 
 /// IDirect3DSurface9::LockRect(locked rect, rect, flags).
 fn surface_lock_rect(c: &mut Cpu) -> u32 {
     let (p, v) = surf(c);
     let (this, out, rect, flags) = (arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3));
+    // a level of a managed texture on 9Ex: the twin's level
+    if let Some((t, key, cube)) = super::ex::surface_texture(p) {
+        return twin_level_lock(this, super::ex::twin(t).unwrap_or(t), key, cube, out, rect, flags & !(D3DLOCK_DISCARD | D3DLOCK_NOOVERWRITE));
+    }
     let mut desc = D3DSURFACE_DESC::default();
     let r = unsafe { (v.GetDesc)(p, &mut desc) };
     if r.is_err() {
@@ -572,7 +613,47 @@ fn surface_lock_rect(c: &mut Cpu) -> u32 {
 fn surface_unlock_rect(c: &mut Cpu) -> u32 {
     let (p, v) = surf(c);
     end_lock(arg(c, 0), 0);
+    if let Some((t, key, cube)) = super::ex::surface_texture(p) {
+        let twin = super::ex::twin(t).unwrap_or(t);
+        let r = unsafe {
+            if cube {
+                (vtbl::<IDirect3DCubeTexture9_Vtbl>(twin).UnlockRect)(twin, D3DCUBEMAP_FACES((key >> 16) as i32), key & 0xffff)
+            } else {
+                (vtbl::<IDirect3DTexture9_Vtbl>(twin).UnlockRect)(twin, key)
+            }
+        };
+        super::ex::upload(t, cube);
+        return hr(r);
+    }
     hr(unsafe { (v.UnlockRect)(p) })
+}
+
+/// A lock of a managed texture's level through its surface (`this`, lock key 0): the level of
+/// the twin `twin` (`key`: level, or face and level).
+fn twin_level_lock(this: u32, twin: *mut c_void, key: u32, cube: bool, out: u32, rect: u32, flags: u32) -> u32 {
+    let mut desc = D3DSURFACE_DESC::default();
+    unsafe {
+        if cube {
+            let v: &IDirect3DCubeTexture9_Vtbl = vtbl(twin);
+            let (face, level) = (D3DCUBEMAP_FACES((key >> 16) as i32), key & 0xffff);
+            let r = (v.GetLevelDesc)(twin, level, &mut desc);
+            if r.is_err() {
+                return hr(r);
+            }
+            lock_rect_common(this, 0, &desc, out, rect, flags, |lr| (v.LockRect)(twin, face, level, lr, cp(rect), flags), || {
+                let _ = (v.UnlockRect)(twin, face, level);
+            })
+        } else {
+            let v: &IDirect3DTexture9_Vtbl = vtbl(twin);
+            let r = (v.GetLevelDesc)(twin, key, &mut desc);
+            if r.is_err() {
+                return hr(r);
+            }
+            lock_rect_common(this, 0, &desc, out, rect, flags, |lr| (v.LockRect)(twin, key, lr, cp(rect), flags), || {
+                let _ = (v.UnlockRect)(twin, key);
+            })
+        }
+    }
 }
 
 /// IDirect3DSurface9, in the SDK's order (17 methods).
@@ -655,7 +736,7 @@ fn buffer_unlock(c: &mut Cpu) -> u32 {
 
 fn buffer_get_desc(c: &mut Cpu) -> u32 {
     let (p, v) = buf(c);
-    hr(unsafe { (v.GetDesc)(p, gp(arg(c, 1))) })
+    super::ex::fix_pool_after(p, arg(c, 1), || hr(unsafe { (v.GetDesc)(p, gp(arg(c, 1))) }))
 }
 
 macro_rules! buffer_methods {

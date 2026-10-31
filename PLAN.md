@@ -170,8 +170,13 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
       x87 arithmetic instruction is ~40 host instructions, most of it the 24-bit rounding check
       (Direct3D sets 24-bit precision); the code is 35 MB for 1.9 MB of x86. The profile is
       flat now: the largest guest function is 4.8 %, DrawIndexedPrimitive 5.9 %, Present 4.5 %.
+      - Direct3D 9Ex with the flip model (`d3d9/ex.rs`, the user's choice to do first): 157 fps
+        against 139-147 (one run), imports per picture 1.17 against 1.36-1.50 ms, Present 0.18
+        against 0.23-0.32 ms on average; Present above 2 ms stays rare (6 of 8368). Seen: front
+        end, mission, a simulated loss with Reset. To be confirmed by hand: Alt+Enter both
+        ways, the Video menu's mode change (Reset), Alt+Tab, the picture's black bars.
       Next: a cheaper 24-bit rounding path; registers passed between functions in host
-      registers instead of `Cpu`; D3D9Ex with flip model (Present's 2-5 ms stalls).
+      registers instead of `Cpu`.
       Found on the way: a device loss in a mission (TestCooperativeLevel lost, not scripted)
       was followed by a null read in 0x47a6b0 (from 0x47a07a): to be looked at.
 - [ ] Frame rate: even frame times (docs/superpowers/plans/2026-10-30-tick-decoupling.md,
