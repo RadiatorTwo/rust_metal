@@ -57,9 +57,18 @@ pub(super) fn render_size() -> (u32, u32) {
     }
 }
 
+/// A screen narrower than 4:3 (5:4, 1280x1024) keeps the game's own aspect handling: its
+/// viewport math (0x549a50) assumes the picture is at least as wide as 4:3 and would make a
+/// viewport taller than the back buffer, which ValidateDevice refuses (the front end's
+/// "vc_base.mtl failed to validate"). There the picture is 4:3 stretched to the screen, as in
+/// the original.
+fn narrow(w: u32, h: u32) -> bool {
+    w == 0 || h == 0 || (w as u64) * 3 < (h as u64) * 4
+}
+
 pub fn aspect_value(c: &mut Cpu) {
     let (w, h) = render_size();
-    if mem().rd32(c.r[ESP] + 4) != 0 || w == 0 || h == 0 {
+    if mem().rd32(c.r[ESP] + 4) != 0 || narrow(w, h) {
         return call_original(c, ASPECT_VALUE);
     }
     c.fpush(w as f64 / h as f64);
@@ -71,7 +80,7 @@ pub fn aspect_value(c: &mut Cpu) {
 pub fn aspect_auto(c: &mut Cpu) {
     let m = mem();
     let (w, h) = (m.rd32(c.r[ESP] + 8), m.rd32(c.r[ESP] + 12));
-    if w == 0 || h == 0 {
+    if narrow(w, h) {
         return call_original(c, ASPECT_AUTO);
     }
     c.fpush(w as f64 / h as f64);
