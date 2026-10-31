@@ -208,6 +208,12 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
         picture 2.76-2.99 ms (before 3.07-3.10), logic per tick 3.41-3.89 (noisy). Seen once:
         a fatal read in __amsg_exit at a mission start (first run after a rebuild); not again
         in 11 runs, 4 of them freshly compiled.
+      Tried and dropped (2026-10-31): the 24-bit rounding check with integer compares on the
+      result's bits (range as one unsigned compare, 24-bit mode tested first; ~17 host
+      instructions instead of ~30, 0x449c60 14.3 -> 12.9 KB): slower, interleaved A/B 3 runs
+      each, guest time 3.08-3.19 against 2.81-3.01 ms. The old check runs in XMM registers
+      beside the arithmetic, off the critical path; the integer one takes general registers
+      that hold the guest's. Fewer instructions is not the measure here: A/B runs are.
       Found on the way: a device loss in a mission (TestCooperativeLevel lost, not scripted)
       was followed by a null read in 0x47a6b0 (from 0x47a07a): to be looked at.
 - [ ] Frame rate: even frame times (docs/superpowers/plans/2026-10-30-tick-decoupling.md,
