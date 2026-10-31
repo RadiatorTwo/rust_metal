@@ -42,3 +42,14 @@ fn simulated_loss_is_lost_then_waits_for_reset() {
     assert_eq!(cooperative_level(0, until, now), D3DERR_DEVICELOST);
     assert_eq!(cooperative_level(0, until, now + Duration::from_secs(3)), D3DERR_DEVICENOTRESET);
 }
+
+/// With the D3D9 worker, TestCooperativeLevel answers from the worker's last Present while the
+/// device is fine; once that said lost, the host is asked again (a real loss must reach Reset).
+#[test]
+fn queued_cooperative_level() {
+    use rust_metal::platform::d3d9::device::queued_coop;
+    let mut asked = false;
+    assert_eq!(queued_coop(0, || { asked = true; D3DERR_DEVICELOST }), 0);
+    assert!(!asked, "a fine device needs no host call");
+    assert_eq!(queued_coop(D3DERR_DEVICELOST, || D3DERR_DEVICENOTRESET), D3DERR_DEVICENOTRESET);
+}

@@ -120,3 +120,26 @@ fn copy_in_takes_a_snapshot() {
     assert_eq!(&copy[..], &(1..=64u8).collect::<Vec<_>>()[..]);
     assert!(copy_in(0, 64).is_none());
 }
+
+/// Waiting for the worker hands the guest turn to other guest threads: the wait goes through
+/// the queue's wait hook, and only when there is something to wait for.
+#[test]
+fn waits_go_through_the_hook() {
+    use std::sync::atomic::AtomicUsize;
+    static WAITS: AtomicUsize = AtomicUsize::new(0);
+    fn hook(wait: &mut dyn FnMut()) {
+        WAITS.fetch_add(1, Ordering::SeqCst);
+        wait();
+    }
+    let q = Queue::with_wait_hook(hook);
+    q.flush();
+    assert_eq!(WAITS.load(Ordering::SeqCst), 0, "nothing recorded: no wait");
+    q.record(Box::new(|| std::thread::sleep(Duration::from_millis(50))));
+    q.picture_done();
+    assert_eq!(WAITS.load(Ordering::SeqCst), 0, "first picture: no wait");
+    q.record(Box::new(|| std::thread::sleep(Duration::from_millis(50))));
+    q.picture_done();
+    assert_eq!(WAITS.load(Ordering::SeqCst), 1, "second picture waits for the first");
+    q.flush();
+    assert_eq!(WAITS.load(Ordering::SeqCst), 2);
+}

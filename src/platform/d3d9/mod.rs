@@ -368,6 +368,7 @@ fn create_device(c: &mut Cpu) -> u32 {
     DEVICE.store(dev as usize, std::sync::atomic::Ordering::Relaxed);
     m.wr32(out, com::wrap(device::METHODS, dev));
     device::invalidate_states();
+    device::device_created();
     queue::start();
     0
 }

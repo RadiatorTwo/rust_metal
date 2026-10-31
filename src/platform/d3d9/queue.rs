@@ -42,8 +42,13 @@ struct Shared {
     progress: Condvar,
 }
 
+/// How a wait for the worker is made: given the wait itself (the guest turn is handed over
+/// around it, `platform::without_turn`).
+pub type WaitHook = fn(&mut dyn FnMut());
+
 pub struct Queue {
     shared: Arc<Shared>,
+    wait_hook: WaitHook,
     /// commands recorded but not yet handed to the worker
     batch: Mutex<Vec<Command>>,
 }
@@ -51,10 +56,15 @@ pub struct Queue {
 impl Queue {
     /// A queue with its worker thread ("d3d9 worker"), which runs as long as the program.
     pub fn new() -> Queue {
+        Queue::with_wait_hook(|wait| wait())
+    }
+
+    /// A queue whose waits for the worker go through `hook`.
+    pub fn with_wait_hook(hook: WaitHook) -> Queue {
         let shared = Arc::new(Shared { state: Mutex::new(State::default()), work: Condvar::new(), progress: Condvar::new() });
         let s = shared.clone();
         std::thread::Builder::new().name("d3d9 worker".into()).spawn(move || worker(&s)).expect("d3d9 worker thread");
-        Queue { shared, batch: Mutex::new(Vec::with_capacity(BATCH)) }
+        Queue { shared, wait_hook: hook, batch: Mutex::new(Vec::with_capacity(BATCH)) }
     }
 
     /// Record a call; the worker makes it after every call recorded before.
@@ -91,20 +101,27 @@ impl Queue {
     /// Return once the worker has made every call recorded so far.
     pub fn flush(&self) {
         let (target, _) = self.submit(self.take_batch(), false);
-        let mut s = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
-        while s.done < target {
-            s = self.shared.progress.wait(s).unwrap_or_else(|e| e.into_inner());
+        self.wait_until(|s| s.done >= target);
+    }
+
+    /// Wait until `ready` (through the wait hook, and only when not ready already).
+    fn wait_until(&self, ready: impl Fn(&State) -> bool) {
+        if ready(&self.shared.state.lock().unwrap_or_else(|e| e.into_inner())) {
+            return;
         }
+        (self.wait_hook)(&mut || {
+            let mut s = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            while !ready(&s) {
+                s = self.shared.progress.wait(s).unwrap_or_else(|e| e.into_inner());
+            }
+        });
     }
 
     /// The picture's calls are recorded (its Present last): hand them over, then wait until
     /// the worker has finished the picture before this one.
     pub fn picture_done(&self) {
         let (_, pictures) = self.submit(self.take_batch(), true);
-        let mut s = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
-        while s.pictures_done + 1 < pictures {
-            s = self.shared.progress.wait(s).unwrap_or_else(|e| e.into_inner());
-        }
+        self.wait_until(|s| s.pictures_done + 1 >= pictures);
     }
 
     /// Calls recorded and not yet made.
@@ -172,7 +189,7 @@ pub fn global() -> Option<&'static Queue> {
 /// Start the queue (CreateDevice, after it succeeded), once.
 pub fn start() {
     if on() && GLOBAL.get().is_none() {
-        GLOBAL.get_or_init(Queue::new);
+        GLOBAL.get_or_init(|| Queue::with_wait_hook(crate::platform::without_turn));
         log!("d3d9: device calls run on their own thread");
     }
 }

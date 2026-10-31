@@ -410,6 +410,18 @@ fn turn_give() {
     TURN.cv.notify_all();
 }
 
+/// Run `wait` (a wait for another host thread, the D3D9 worker) with the guest turn handed to
+/// the other guest threads meanwhile, if this thread holds it.
+pub fn without_turn(wait: &mut dyn FnMut()) {
+    if HELD.get() {
+        turn_give();
+        wait();
+        turn_take();
+    } else {
+        wait();
+    }
+}
+
 /// At a loop head with another thread waiting: let it run first.
 fn turn_yield() {
     if HELD.get() && !EXCLUSIVE.load(Ordering::Relaxed) {

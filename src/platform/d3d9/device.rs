@@ -205,6 +205,7 @@ pub fn lost_ended() -> bool {
     super::queue::flush();
     let p = super::device();
     let host = hr(unsafe { (vtbl::<IDirect3DDevice9_Vtbl>(p).TestCooperativeLevel)(p) });
+    LAST_COOP.store(host, Ordering::Relaxed);
     let ended = cooperative_level(host, *crate::platform::lock(&SIMULATED_LOSS), now) != D3DERR_DEVICELOST;
     if ended {
         SEEN_LOST.store(false, Ordering::Relaxed);
@@ -213,8 +214,21 @@ pub fn lost_ended() -> bool {
     ended
 }
 
-/// The host's TestCooperativeLevel after the worker's last Present (`queue`).
+/// The host's TestCooperativeLevel after the worker's last Present (`queue`), or after the
+/// game's own last question once the device was lost.
 static LAST_COOP: AtomicU32 = AtomicU32::new(0);
+
+/// TestCooperativeLevel with the worker: a fine device's answer is the worker's after its last
+/// Present (`last`, no host call); once that is not fine, the host is asked (`host`), as the game
+/// presents no more until it sees the device come back.
+pub fn queued_coop(last: u32, host: impl FnOnce() -> u32) -> u32 {
+    if last == 0 { 0 } else { host() }
+}
+
+/// A new device is fine (CreateDevice).
+pub(super) fn device_created() {
+    LAST_COOP.store(0, Ordering::Relaxed);
+}
 
 pub const D3DERR_DEVICELOST: u32 = 0x8876_0868;
 pub const D3DERR_DEVICENOTRESET: u32 = 0x8876_0869;
@@ -249,7 +263,16 @@ fn test_cooperative_level(c: &mut Cpu) -> u32 {
     static LAST: AtomicU32 = AtomicU32::new(0);
     let (p, v) = dv(c);
     // with the worker: its answer after the last Present it made
-    let host = if super::queue::global().is_some() { LAST_COOP.load(Ordering::Relaxed) } else { hr(unsafe { (v.TestCooperativeLevel)(p) }) };
+    let host = if super::queue::global().is_some() {
+        let r = queued_coop(LAST_COOP.load(Ordering::Relaxed), || {
+            super::queue::flush();
+            hr(unsafe { (v.TestCooperativeLevel)(p) })
+        });
+        LAST_COOP.store(r, Ordering::Relaxed);
+        r
+    } else {
+        hr(unsafe { (v.TestCooperativeLevel)(p) })
+    };
     let r = cooperative_level(host, *crate::platform::lock(&SIMULATED_LOSS), std::time::Instant::now());
     SEEN_LOST.store(r == D3DERR_DEVICELOST, Ordering::Relaxed);
     if LAST.swap(r, Ordering::Relaxed) != r {
