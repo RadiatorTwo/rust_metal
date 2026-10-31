@@ -174,6 +174,10 @@ pub struct Lifter<'a, 'f> {
     of: Variable,
     /// x87 TOP (0..7)
     top: Variable,
+    /// ST(0)..ST(n-1) held in variables instead of `Cpu::st` (`x87::cacheable`)
+    fst: [Variable; 8],
+    /// how many of ST(0).. are in `fst` now; 0 at every block other code can reach
+    fcached: u32,
     /// the compare just lifted, for the condition right after it (`Fused`)
     fused: Option<Fused>,
     /// no instruction is entered through a jump known only at run time (the function has no
@@ -216,6 +220,7 @@ impl<'a, 'f> Lifter<'a, 'f> {
         let r = std::array::from_fn(|_| b.declare_var(I32));
         let (cf, pf, zf, sf, of) = (b.declare_var(I8), b.declare_var(I8), b.declare_var(I8), b.declare_var(I8), b.declare_var(I8));
         let top = b.declare_var(I32);
+        let fst = std::array::from_fn(|_| b.declare_var(F64));
         let l = Lifter {
             b,
             f,
@@ -233,6 +238,8 @@ impl<'a, 'f> Lifter<'a, 'f> {
             sf,
             of,
             top,
+            fst,
+            fcached: 0,
             fused: None,
             straight: !f.ins.is_empty(),
             cfg,
@@ -769,6 +776,11 @@ impl<'a, 'f> Lifter<'a, 'f> {
 
     /// One instruction, continuing at the next unless it ends its block.
     fn emit(&mut self, i: &Instruction) {
+        // x87 values stay in variables only while nothing else can see `Cpu::st` or reach
+        // the next instruction
+        if self.fcached > 0 && !(self.straight && unsupported(i).is_none() && x87::cacheable(i)) {
+            self.x87_flush();
+        }
         let ends = match unsupported(i) {
             Some(why) => {
                 self.missing.push(why);
@@ -781,7 +793,11 @@ impl<'a, 'f> Lifter<'a, 'f> {
             None => self.insn(i),
         };
         if !ends {
-            self.goto(i.next_ip32());
+            let next = i.next_ip32();
+            if self.fcached > 0 && (self.f.targets.contains(&next) || next == self.f.entry || !self.f.ins.contains(&next)) {
+                self.x87_flush();
+            }
+            self.goto(next);
         }
     }
 

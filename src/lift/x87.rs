@@ -2,6 +2,9 @@
 //! result is rounded to a double anyway); TOP is a Cranelift variable like the integer
 //! registers, so ST(i) is the slot `(top + i) & 7`, found at run time. Things that are rare
 //! or need libm (transcendental functions, 80-bit memory operands) go to `rt_x87`.
+//! Within straight code (no jump target, call, helper or control flow in between) the top
+//! of the stack is held in Cranelift variables (`Lifter::fst`, `cacheable`) and written to
+//! `Cpu::st` only before anything that could see it there (`x87_flush`).
 
 use super::{Lifter, mf, ty};
 use crate::rt::{Cpu, FpuOp, X87};
@@ -23,6 +26,37 @@ pub fn is_x87(m: Mnemonic) -> bool {
             | Fucom | Fucomp | Fucompp | Ficom | Ficomp | Ftst | Fcomi | Fcomip | Fucomi | Fucomip | Fnstsw | Fnstcw
             | Fldcw | Fnclex | Fninit | Ffree | Fincstp | Fdecstp | Fnop | Fxam | Fsin | Fcos | Fsincos | Fptan
             | Fpatan | F2xm1 | Fyl2x | Fyl2xp1 | Fscale | Fprem | Fprem1 | Fxtract
+    )
+}
+
+/// Whether the instruction leaves x87 values cached in variables (`Lifter::fst`) where they
+/// are: integer instructions without helpers or control flow, and the x87 instructions that
+/// take ST(i) through `st`/`set_st`/`fpush`/`fpop`. Anything else gets them flushed first.
+pub fn cacheable(i: &Instruction) -> bool {
+    use Mnemonic::*;
+    let m = i.mnemonic();
+    if i.flow_control() != iced_x86::FlowControl::Next {
+        return false;
+    }
+    if is_x87(m) {
+        let f80 = (i.op_count() > 0 && (i.op0_kind() == OpKind::Memory || i.op_kind(i.op_count() - 1) == OpKind::Memory))
+            && i.memory_size() == MemorySize::Float80;
+        return !f80
+            && matches!(
+                m,
+                Fld | Fild | Fst | Fstp | Fist | Fistp | Fisttp | Fxch | Fadd | Faddp | Fiadd | Fsub | Fsubp | Fisub
+                    | Fsubr | Fsubrp | Fisubr | Fmul | Fmulp | Fimul | Fdiv | Fdivp | Fidiv | Fdivr | Fdivrp | Fidivr
+                    | Fchs | Fabs | Fsqrt | Frndint | Fld1 | Fldz | Fldpi | Fldl2e | Fldl2t | Fldlg2 | Fldln2 | Fcom
+                    | Fcomp | Fcompp | Fucom | Fucomp | Fucompp | Ficom | Ficomp | Ftst | Fcomi | Fcomip | Fucomi
+                    | Fucomip | Fnstsw | Fnstcw | Fldcw | Fnclex | Ffree | Fnop
+            );
+    }
+    matches!(
+        m,
+        Mov | Movzx | Movsx | Lea | Add | Adc | Sub | Sbb | Cmp | And | Or | Xor | Test | Inc | Dec | Neg | Not | Shl
+            | Shr | Sar | Rol | Ror | Imul | Push | Pop | Xchg | Cdq | Cwde | Nop | Sete | Setne | Setb | Setae | Setbe
+            | Seta | Setl | Setge | Setle | Setg | Sets | Setns | Setp | Setnp | Cmove | Cmovne | Cmovb | Cmovae
+            | Cmovbe | Cmova | Cmovl | Cmovge | Cmovle | Cmovg | Cmovs | Cmovns | Sahf | Lahf
     )
 }
 
@@ -49,13 +83,34 @@ impl Lifter<'_, '_> {
         let t = self.b.ins().ishl_imm_u(t, 3);
         self.b.ins().iadd(self.cpu, t)
     }
-    fn st(&mut self, k: u32) -> Value {
+    fn st_mem(&mut self, k: u32) -> Value {
         let p = self.slot(k);
         self.b.ins().load(F64, mf(), p, offset_of!(Cpu, st) as i32)
     }
-    fn set_st(&mut self, k: u32, v: Value) {
+    fn set_st_mem(&mut self, k: u32, v: Value) {
         let p = self.slot(k);
         self.b.ins().store(mf(), v, p, offset_of!(Cpu, st) as i32);
+    }
+    /// ST(k), from its variable while cached.
+    fn st(&mut self, k: u32) -> Value {
+        if k < self.fcached { self.b.use_var(self.fst[k as usize]) } else { self.st_mem(k) }
+    }
+    fn set_st(&mut self, k: u32, v: Value) {
+        if k < self.fcached {
+            self.b.def_var(self.fst[k as usize], v)
+        } else {
+            self.set_st_mem(k, v)
+        }
+    }
+    /// The cached ST(0).. to `Cpu::st`: before anything that reads it there or another way
+    /// into the next instruction. A value written this way keeps the slot's `st_int_of`, as
+    /// arithmetic results always did.
+    pub(super) fn x87_flush(&mut self) {
+        for k in 0..self.fcached {
+            let v = self.b.use_var(self.fst[k as usize]);
+            self.set_st_mem(k, v);
+        }
+        self.fcached = 0;
     }
     fn add_top(&mut self, d: i64) {
         let t = self.b.use_var(self.top);
@@ -64,11 +119,31 @@ impl Lifter<'_, '_> {
         self.b.def_var(self.top, t);
     }
     fn fpush(&mut self, v: Value) {
+        if !self.straight {
+            self.add_top(-1);
+            self.set_st_mem(0, v);
+            return;
+        }
+        if self.fcached == 8 {
+            self.x87_flush();
+        }
         self.add_top(-1);
-        self.set_st(0, v);
+        for k in (0..self.fcached as usize).rev() {
+            let x = self.b.use_var(self.fst[k]);
+            self.b.def_var(self.fst[k + 1], x);
+        }
+        self.b.def_var(self.fst[0], v);
+        self.fcached += 1;
     }
     fn fpop(&mut self) {
         self.add_top(1);
+        if self.fcached > 0 {
+            for k in 1..self.fcached as usize {
+                let x = self.b.use_var(self.fst[k]);
+                self.b.def_var(self.fst[k - 1], x);
+            }
+            self.fcached -= 1;
+        }
     }
 
     /// Copy ST(src) with its exact integer (see `Cpu::st_int`) to ST(dst).
@@ -291,10 +366,16 @@ impl Lifter<'_, '_> {
                 if mem0 && i.memory_size() == MemorySize::Float80 {
                     let a = self.addr(i);
                     self.x87_helper(X87::LoadF80, Some(a));
-                } else if mem0 {
+                } else if mem0 && i.memory_size() != MemorySize::Int64 {
                     let v = self.fmem(i);
                     self.fpush(v);
-                    if i.memory_size() == MemorySize::Int64 {
+                } else if mem0 {
+                    // in `Cpu::st` (not cacheable): with the integer it came from
+                    self.x87_flush();
+                    let v = self.fmem(i);
+                    self.add_top(-1);
+                    self.set_st_mem(0, v);
+                    {
                         // remember the integer: fistp qword of this double gives it back
                         let x = self.load_mem(i, I64);
                         let p = self.slot(0);
@@ -305,8 +386,14 @@ impl Lifter<'_, '_> {
                 } else {
                     // fld st(i): push a copy (ST(i) is ST(i+1) after the push)
                     let k = sti(0);
-                    self.add_top(-1);
-                    self.copy_st(0, k + 1);
+                    if k < self.fcached {
+                        let v = self.st(k);
+                        self.fpush(v);
+                    } else {
+                        self.x87_flush();
+                        self.add_top(-1);
+                        self.copy_st(0, k + 1);
+                    }
                 }
             }
             Fst | Fstp => {
@@ -325,7 +412,11 @@ impl Lifter<'_, '_> {
                     self.store_mem(i, v);
                 } else {
                     let k = sti(0);
-                    if k != 0 {
+                    if k != 0 && k < self.fcached {
+                        let v = self.st(0);
+                        self.set_st(k, v);
+                    } else if k != 0 {
+                        self.x87_flush();
                         self.copy_st(k, 0);
                     }
                 }
@@ -335,6 +426,9 @@ impl Lifter<'_, '_> {
             }
             Fist | Fistp | Fisttp => {
                 let n = i.memory_size().size() as u32;
+                if n == 8 {
+                    self.x87_flush();
+                }
                 let v = self.st(0);
                 let mut x = self.to_int(v, n, m == Fisttp);
                 if n == 8 {
@@ -353,6 +447,13 @@ impl Lifter<'_, '_> {
             }
             Fxch => {
                 let k = sti(1); // fxch st(0), st(i)
+                if k < self.fcached {
+                    let (a, b) = (self.st(0), self.st(k));
+                    self.set_st(0, b);
+                    self.set_st(k, a);
+                    return;
+                }
+                self.x87_flush();
                 let (p0, pk) = (self.slot(0), self.slot(k));
                 for (off, t) in [(offset_of!(Cpu, st), F64), (offset_of!(Cpu, st_int), I64), (offset_of!(Cpu, st_int_of), I64)] {
                     let a = self.b.ins().load(t, mf(), p0, off as i32);

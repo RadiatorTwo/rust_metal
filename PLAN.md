@@ -199,6 +199,15 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
       depth known when lifting, but storing only the slots the function itself pushed around
       calls (the first try stored all eight), with each function's net stack effect from
       discovery; the x87 stack through memory puts store-forwarding on every FP dependency.
+      - x87 stack in variables within straight code (`x87::cacheable`, `x87_flush`): values
+        pushed since the last jump target, call, helper or control flow are Cranelift variables,
+        written to `Cpu::st` only before those; integer instructions without helpers keep them
+        (no interprocedural analysis needed). fild/fistp qword stay in `Cpu::st` (exact
+        integers). Tick fingerprints against the commit before: camera, player, game time and
+        objects identical in all 1301 ticks. Result (5 runs): 198-219 fps, guest time per
+        picture 2.76-2.99 ms (before 3.07-3.10), logic per tick 3.41-3.89 (noisy). Seen once:
+        a fatal read in __amsg_exit at a mission start (first run after a rebuild); not again
+        in 11 runs, 4 of them freshly compiled.
       Found on the way: a device loss in a mission (TestCooperativeLevel lost, not scripted)
       was followed by a null read in 0x47a6b0 (from 0x47a07a): to be looked at.
 - [ ] Frame rate: even frame times (docs/superpowers/plans/2026-10-30-tick-decoupling.md,
