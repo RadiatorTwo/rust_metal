@@ -1,6 +1,6 @@
 # Plan — what is done, what is open
 
-Updated 2026-10-30. Details on how things work: CLAUDE.md. Design:
+Updated 2026-10-31. Details on how things work: CLAUDE.md. Design:
 `docs/superpowers/specs/2026-10-29-rust-metal-design.md`.
 
 ## Done
@@ -146,8 +146,36 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
       the same (seen: the view matrix changes only at a tick). Per drawn frame only 0x44d9f0 gets
       the 40 ms step (`GUNMETAL_STEPS=1`; envelopes of a list at 0x661d6c whose results are not
       stored, probably Xbox rumble: harmless).
+- [ ] Performance, 2026-10-31 (the user: 150 fps that swing are not acceptable; aim: steady
+      several hundred fps). Order now: the recompiler's code first (it speeds the tick and the
+      drawing alike), then measure again; the tick thread (design (a), below) is on hold.
+      Why on hold: GetWriteWatch costs 0.65 ms a call (the plan assumed 0.1), the logic reads
+      what the drawing writes between ticks, and the world copy needs three 4 GB worlds, a
+      worker posing as the main thread and D3D replay, for a gain only in pictures with a tick.
+      Benchmark: cold start to mission 1, then tick-indexed walking and turning (`t50:`..`t1300:
+      close`), window 6-50 s after the mission's first picture; columns from `GUNMETAL_FRAMES`:
+      guest time per picture without a tick (produce - imports) and logic per tick. Done:
+      - flags cross calls, returns and jumps between functions only where read on the other
+        side (`discover::FlagCrossings`: 1 call site of 44731 reads flags after the call, the
+        C runtime's `__fload_withFB`; 21 entries read flags at entry);
+      - stores of registers the function did not change are dropped (`lift::drop_silent_stores`;
+        `Cpu` loads are `trusted`, so unused ones go too): a getter's code 121 -> 43 bytes;
+      - `cmp`/`test` followed by jcc/setcc/cmovcc becomes one compare (`lift::Fused`).
+      Result (2 runs each, before -> after): logic per tick 4.87 -> 4.05 ms, guest time per
+      picture 4.74 -> 4.41 ms, fps 135 -> 143, pictures with a tick 11.6 -> 10.5 ms.
+      Tried and dropped: x87 registers in Cranelift variables with the depth known when lifting
+      (logic per tick 4.04 -> 4.43 ms: storing and reloading the eight slots at every call,
+      `__ftol` included, costs more than the memory accesses it saves).
+      Seen in the generated code (`GUNMETAL_DISASM=<addr>` with `examples/functions.rs`): each
+      x87 arithmetic instruction is ~40 host instructions, most of it the 24-bit rounding check
+      (Direct3D sets 24-bit precision); the code is 35 MB for 1.9 MB of x86. The profile is
+      flat now: the largest guest function is 4.8 %, DrawIndexedPrimitive 5.9 %, Present 4.5 %.
+      Next: a cheaper 24-bit rounding path; registers passed between functions in host
+      registers instead of `Cpu`; D3D9Ex with flip model (Present's 2-5 ms stalls).
+      Found on the way: a device loss in a mission (TestCooperativeLevel lost, not scripted)
+      was followed by a null read in 0x47a6b0 (from 0x47a07a): to be looked at.
 - [ ] Frame rate: even frame times (docs/superpowers/plans/2026-10-30-tick-decoupling.md,
-      design (a) chosen: the tick on a second thread). Baseline 2026-10-31, corrected
+      design (a) chosen: the tick on a second thread; on hold, see above). Baseline 2026-10-31, corrected
       (`GUNMETAL_FRAMES` without page probes, 3 cold runs of the profile script, mission 1,
       58-108 s with walking and turning; .superpowers/perf/task-spikes-report.md): 145-157 fps;
       intervals of pictures with a tick avg 11.5-12.0 ms, p99 20-21, max 30-32; without a tick

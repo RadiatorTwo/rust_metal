@@ -171,6 +171,7 @@ pub fn compile_cached(prog: &Program, smc: &Smc, code: &mut Code, hooks: &[(u32,
                     let mut get_fn = |func: &mut Function, a: u32| module.declare_func_in_func(ids[&a], func);
                     Lifter::new(b, f, prog, smc, &refs, &mut get_fn, tcfg).lift(code)
                 };
+                crate::lift::drop_silent_stores(&mut ctx.func);
                 stats.instructions += f.ins.len();
                 if missing.is_empty() {
                     stats.complete += 1;
@@ -298,6 +299,21 @@ pub fn compile_cached(prog: &Program, smc: &Smc, code: &mut Code, hooks: &[(u32,
     Compiled { _module: module, enter, fns, stats }
 }
 
+/// `GUNMETAL_DISASM=<hex addr>[,..]`: print these functions' Cranelift IR and machine code when
+/// they are compiled (not from the cache; `examples/functions.rs` compiles without it).
+fn disasm_wanted(addr: u32) -> bool {
+    static WANTED: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
+    WANTED
+        .get_or_init(|| {
+            std::env::var("GUNMETAL_DISASM")
+                .unwrap_or_default()
+                .split(',')
+                .filter_map(|a| u32::from_str_radix(a.trim().trim_start_matches("0x"), 16).ok())
+                .collect()
+        })
+        .contains(&addr)
+}
+
 /// Compile the lifted functions on every core; the results in their order.
 fn compile_all(isa: &dyn cranelift_codegen::isa::TargetIsa, lifted: Vec<(u32, FuncId, Function)>) -> Vec<(u32, FuncId, Result<Blob, String>)> {
     let n = lifted.len();
@@ -315,9 +331,19 @@ fn compile_all(isa: &dyn cranelift_codegen::isa::TargetIsa, lifted: Vec<(u32, Fu
                     }
                     let (addr, id, func) = work[k].lock().unwrap().take().unwrap();
                     let mut ctx = cranelift_codegen::Context::for_function(func);
+                    let show = disasm_wanted(addr);
+                    if show {
+                        ctx.set_disasm(true);
+                        eprintln!("== {addr:#x} CLIF
+{}", ctx.func.display());
+                    }
                     let r = match ctx.compile(isa, &mut ControlPlane::default()) {
                         Ok(_) => {
                             let c = ctx.compiled_code().unwrap();
+                            if show {
+                                eprintln!("== {addr:#x} machine code ({} bytes)
+{}", c.code_buffer().len(), c.vcode.as_deref().unwrap_or(""));
+                            }
                             Ok(Blob {
                                 id,
                                 align: c.buffer.min_alignment as u64,

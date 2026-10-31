@@ -287,5 +287,7 @@ statistics), `examples/dis.rs <folder> <addr|all>`, `examples/ghidra.rs <folder>
 (discovery against the Ghidra export; `GUNMETAL_NO_GHIDRA=1` seeds with the entry point
 alone), `examples/imports.rs <exe>`, `examples/resources.rs`, `examples/tickprint.rs a b`
 (first difference of two fingerprint files), `examples/watchbench.rs` (GetWriteWatch's cost
-without the game). `cargo test --release` needs no
+without the game), `examples/flags.rs <folder>` (where flags cross calls and returns).
+`GUNMETAL_DISASM=<hex addr>[,..]` prints those functions' Cranelift IR and machine code when they
+are compiled (with `examples/functions.rs`, which does not use the cache). `cargo test --release` needs no
 game files.

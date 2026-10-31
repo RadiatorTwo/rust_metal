@@ -4,7 +4,9 @@
 //! entry and stored back around calls, returns and jumps out of the function. Every
 //! instruction starts a block; a jump inside the function is a jump, a jump into another
 //! function is a tail call (`return_call`, tail calling convention), so loops that span
-//! functions do not grow the host stack. Flags nobody reads are removed by Cranelift.
+//! functions do not grow the host stack. Flags nobody reads are removed by Cranelift. Flags
+//! cross calls, returns and jumps between functions only where `Program::flags` found them
+//! read on the other side; elsewhere they are neither stored nor loaded there.
 
 use crate::discover::{Func, Program, direct_target};
 use crate::rt::Cpu;
@@ -140,6 +142,20 @@ fn ty(size: u32) -> Type {
     }
 }
 
+/// A `cmp` or `test` and what it compared. A condition right after it (jcc, setcc, cmovcc,
+/// reached only from it) becomes one compare of these values instead of flags put together
+/// bit by bit (`cond`), and the flags are left to Cranelift's dead code removal.
+#[derive(Clone, Copy)]
+struct Fused {
+    /// the next instruction, the only one that may use it
+    at: u32,
+    /// `cmp x, y` (else `test`: r = x & y)
+    cmp: bool,
+    x: Value,
+    y: Value,
+    r: Value,
+}
+
 pub struct Lifter<'a, 'f> {
     pub b: FunctionBuilder<'f>,
     f: &'a Func,
@@ -158,6 +174,11 @@ pub struct Lifter<'a, 'f> {
     of: Variable,
     /// x87 TOP (0..7)
     top: Variable,
+    /// the compare just lifted, for the condition right after it (`Fused`)
+    fused: Option<Fused>,
+    /// no instruction is entered through a jump known only at run time (the function has no
+    /// indirect jump): values of one instruction can be used in the next (`Fused`)
+    straight: bool,
     cfg: TargetFrontendConfig,
     blocks: HashMap<u32, Block>,
     /// blocks that leave the function towards an address
@@ -169,6 +190,12 @@ pub struct Lifter<'a, 'f> {
 
 fn mf() -> MemFlagsData {
     MemFlagsData::new()
+}
+
+/// For `Cpu`'s fields: they never fault, so a load nobody uses is removed
+/// (`drop_silent_stores` leaves many).
+fn cpu_mf() -> MemFlagsData {
+    MemFlagsData::trusted()
 }
 
 impl<'a, 'f> Lifter<'a, 'f> {
@@ -189,7 +216,7 @@ impl<'a, 'f> Lifter<'a, 'f> {
         let r = std::array::from_fn(|_| b.declare_var(I32));
         let (cf, pf, zf, sf, of) = (b.declare_var(I8), b.declare_var(I8), b.declare_var(I8), b.declare_var(I8), b.declare_var(I8));
         let top = b.declare_var(I32);
-        let mut l = Lifter {
+        let l = Lifter {
             b,
             f,
             prog,
@@ -206,13 +233,14 @@ impl<'a, 'f> Lifter<'a, 'f> {
             sf,
             of,
             top,
+            fused: None,
+            straight: !f.ins.is_empty(),
             cfg,
             blocks: HashMap::new(),
             exits: HashMap::new(),
             dyn_block: None,
             missing: Vec::new(),
         };
-        l.load_state();
         l
     }
 
@@ -227,30 +255,52 @@ impl<'a, 'f> Lifter<'a, 'f> {
         ]
     }
 
-    fn load_state(&mut self) {
+    /// Registers and x87 TOP from `Cpu`.
+    fn load_regs(&mut self) {
         for k in 0..8 {
-            let v = self.b.ins().load(I32, mf(), self.cpu, (offset_of!(Cpu, r) + 4 * k) as i32);
+            let v = self.b.ins().load(I32, cpu_mf(), self.cpu, (offset_of!(Cpu, r) + 4 * k) as i32);
             self.b.def_var(self.r[k], v);
         }
-        for (var, off) in self.flag_vars() {
-            let v = self.b.ins().load(I8, mf(), self.cpu, off as i32);
-            self.b.def_var(var, v);
-        }
-        let t = self.b.ins().load(I32, mf(), self.cpu, offset_of!(Cpu, top) as i32);
+        let t = self.b.ins().load(I32, cpu_mf(), self.cpu, offset_of!(Cpu, top) as i32);
         self.b.def_var(self.top, t);
     }
 
-    fn store_state(&mut self) {
+    fn load_flags(&mut self) {
+        for (var, off) in self.flag_vars() {
+            let v = self.b.ins().load(I8, cpu_mf(), self.cpu, off as i32);
+            self.b.def_var(var, v);
+        }
+    }
+
+    fn load_state(&mut self) {
+        self.load_regs();
+        self.load_flags();
+    }
+
+    /// Registers and x87 TOP to `Cpu`, and the flags too when `flags`.
+    fn store_regs(&mut self, flags: bool) {
         for k in 0..8 {
             let v = self.b.use_var(self.r[k]);
             self.b.ins().store(mf(), v, self.cpu, (offset_of!(Cpu, r) + 4 * k) as i32);
         }
-        for (var, off) in self.flag_vars() {
-            let v = self.b.use_var(var);
-            self.b.ins().store(mf(), v, self.cpu, off as i32);
+        if flags {
+            for (var, off) in self.flag_vars() {
+                let v = self.b.use_var(var);
+                self.b.ins().store(mf(), v, self.cpu, off as i32);
+            }
         }
         let t = self.b.use_var(self.top);
         self.b.ins().store(mf(), t, self.cpu, offset_of!(Cpu, top) as i32);
+    }
+
+    /// Everything, for host helpers and traps, which may read or change any of it.
+    fn store_state(&mut self) {
+        self.store_regs(true);
+    }
+
+    /// Whether flags must go along into the code at `known` (None: found at run time).
+    fn flags_into(&self, known: Option<u32>) -> bool {
+        known.is_none_or(|t| !self.prog.fns.contains_key(&t) || self.prog.flags.read_at_entry.contains(&t))
     }
 
     fn reg(&mut self, k: usize) -> Value {
@@ -438,6 +488,38 @@ impl<'a, 'f> Lifter<'a, 'f> {
 
     fn cond(&mut self, cc: ConditionCode) -> Value {
         use ConditionCode as C;
+        if let Some(f) = self.fused {
+            let ccs = if f.cmp {
+                match cc {
+                    C::e => Some((IntCC::Equal, f.x, f.y)),
+                    C::ne => Some((IntCC::NotEqual, f.x, f.y)),
+                    C::b => Some((IntCC::UnsignedLessThan, f.x, f.y)),
+                    C::ae => Some((IntCC::UnsignedGreaterThanOrEqual, f.x, f.y)),
+                    C::be => Some((IntCC::UnsignedLessThanOrEqual, f.x, f.y)),
+                    C::a => Some((IntCC::UnsignedGreaterThan, f.x, f.y)),
+                    C::l => Some((IntCC::SignedLessThan, f.x, f.y)),
+                    C::ge => Some((IntCC::SignedGreaterThanOrEqual, f.x, f.y)),
+                    C::le => Some((IntCC::SignedLessThanOrEqual, f.x, f.y)),
+                    C::g => Some((IntCC::SignedGreaterThan, f.x, f.y)),
+                    _ => None,
+                }
+            } else {
+                // CF = OF = 0
+                let zero = self.iconst(self.b.func.dfg.value_type(f.r), 0);
+                match cc {
+                    C::e | C::be => Some((IntCC::Equal, f.r, zero)),
+                    C::ne | C::a => Some((IntCC::NotEqual, f.r, zero)),
+                    C::s | C::l => Some((IntCC::SignedLessThan, f.r, zero)),
+                    C::ns | C::ge => Some((IntCC::SignedGreaterThanOrEqual, f.r, zero)),
+                    C::le => Some((IntCC::SignedLessThanOrEqual, f.r, zero)),
+                    C::g => Some((IntCC::SignedGreaterThan, f.r, zero)),
+                    _ => None,
+                }
+            };
+            if let Some((c, a, b)) = ccs {
+                return self.b.ins().icmp(c, a, b);
+            }
+        }
         let (cf, pf, zf, sf, of) = (self.cf, self.pf, self.zf, self.sf, self.of);
         let (v, negate) = match cc {
             C::o | C::no => (self.flag(of), cc == C::no),
@@ -475,7 +557,9 @@ impl<'a, 'f> Lifter<'a, 'f> {
 
     /// Leave the function towards `tgt`: a tail call to a function, or through dispatch.
     fn exit_to(&mut self, tgt: Value, known: Option<u32>) {
-        self.store_state();
+        // a jump out of a function that returns flags carries them to that function's return
+        let flags = self.flags_into(known) || self.prog.flags.returned.contains(&self.f.entry);
+        self.store_regs(flags);
         if let Some(t) = known.filter(|t| self.prog.fns.contains_key(t)) {
             let f = self.guest_fn(t);
             self.b.ins().return_call(f, &[self.cpu]);
@@ -526,7 +610,8 @@ impl<'a, 'f> Lifter<'a, 'f> {
     fn call_to(&mut self, i: &Instruction, tgt: Value, known: Option<u32>) {
         let ret = self.iconst(I32, i.next_ip32() as i64);
         self.push32(ret);
-        self.store_state();
+        let flags = self.flags_into(known);
+        self.store_regs(flags);
         if let Some(t) = known.filter(|t| self.prog.fns.contains_key(t)) {
             let f = self.guest_fn(t);
             self.b.ins().call(f, &[self.cpu]);
@@ -535,7 +620,10 @@ impl<'a, 'f> Lifter<'a, 'f> {
             let fp = self.b.inst_results(call)[0];
             self.b.ins().call_indirect(self.refs.guest_sig, fp, &[self.cpu]);
         }
-        self.load_state();
+        self.load_regs();
+        if self.prog.flags.read_after_call.contains(&i.ip32()) {
+            self.load_flags();
+        }
         // an event handler asked to stop: return all the way out
         let stop = self.b.ins().load(I32, mf(), self.cpu, offset_of!(Cpu, stop) as i32);
         let (out, on) = (self.b.create_block(), self.b.create_block());
@@ -568,6 +656,14 @@ impl<'a, 'f> Lifter<'a, 'f> {
     // ---- the function ---------------------------------------------------------------------------
     pub fn lift(mut self, code: &mut crate::discover::Code) -> Vec<String> {
         let addrs: Vec<u32> = self.f.ins.iter().copied().collect();
+        self.straight = addrs.iter().all(|&a| code.at(a).unwrap().flow_control() != FlowControl::IndirectBranch);
+        self.load_regs();
+        // a function returning flags may pass on the ones it was entered with
+        if self.prog.flags.read_at_entry.contains(&self.f.entry) || self.prog.flags.returned.contains(&self.f.entry) {
+            self.load_flags();
+        } else {
+            self.zero_flags(&[self.cf, self.pf, self.zf, self.sf, self.of]);
+        }
         for &a in &addrs {
             let b = self.b.create_block();
             self.blocks.insert(a, b);
@@ -597,7 +693,16 @@ impl<'a, 'f> Lifter<'a, 'f> {
             if heads.contains(&a) {
                 self.poll();
             }
+            // only the instruction right after a compare, reached from nowhere else
+            if self.fused.is_some_and(|f| f.at != a || a == self.f.entry || self.f.targets.contains(&a)) {
+                self.fused = None;
+            }
+            let was = self.fused;
             self.emit(&i);
+            // a compare sets it for the next instruction; anything else ends it
+            if self.fused.is_some_and(|f| was.is_some_and(|w| w.at == f.at)) {
+                self.fused = None;
+            }
         }
         let mut exits: Vec<(u32, Block)> = self.exits.iter().map(|(&t, &b)| (t, b)).collect();
         exits.sort_unstable();
@@ -685,7 +790,8 @@ impl<'a, 'f> Lifter<'a, 'f> {
                 let sp = self.reg(4);
                 let sp = self.b.ins().iadd_imm_s(sp, 4 + n);
                 self.set_reg(4, sp);
-                self.store_state();
+                let flags = self.prog.flags.returned.contains(&self.f.entry);
+                self.store_regs(flags);
                 self.b.ins().return_(&[]);
                 return true;
             }
@@ -1171,6 +1277,8 @@ impl<'a, 'f> Lifter<'a, 'f> {
         self.set_zsp(r);
         if !matches!(m, Cmp | Test) {
             self.wr(i, 0, r);
+        } else if self.straight {
+            self.fused = Some(Fused { at: i.next_ip32(), cmp: m == Cmp, x, y, r });
         }
     }
 
@@ -1499,4 +1607,35 @@ impl<'a, 'f> Lifter<'a, 'f> {
 /// eax..edi -> 0..7 for any size of the register
 fn gpr(r: Register) -> usize {
     r.full_register32() as usize - Register::EAX as usize
+}
+
+/// Removes stores that put a value back into the `Cpu` field it was loaded from: a register,
+/// flag or TOP the function did not change since its last load (`load_state`, `load_regs`,
+/// `load_flags`). Such a store is silent: between a load of a field and any later point, the
+/// field is written only by our own stores of state (`store_regs`), and each of those is
+/// followed by the function's end or a reload of every register; host helpers and calls
+/// reload too. So a getter's return stores eax and esp, not all 8 registers and the flags.
+pub fn drop_silent_stores(func: &mut ir::Function) {
+    use ir::{InstructionData, Opcode, ValueDef};
+    let Some(entry) = func.layout.entry_block() else { return };
+    let cpu = func.dfg.block_params(entry)[0];
+    let mut dead = Vec::new();
+    for block in func.layout.blocks() {
+        for inst in func.layout.block_insts(block) {
+            let InstructionData::Store { opcode: Opcode::Store, args: [v, p], offset, .. } = func.dfg.insts[inst] else { continue };
+            let p = func.dfg.resolve_aliases(p);
+            if p != cpu {
+                continue;
+            }
+            let ValueDef::Result(def, _) = func.dfg.value_def(func.dfg.resolve_aliases(v)) else { continue };
+            if let InstructionData::Load { opcode: Opcode::Load, arg, offset: o, .. } = func.dfg.insts[def] {
+                if func.dfg.resolve_aliases(arg) == p && o == offset {
+                    dead.push(inst);
+                }
+            }
+        }
+    }
+    for inst in dead {
+        func.layout.remove_inst(inst);
+    }
 }

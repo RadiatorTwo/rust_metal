@@ -177,6 +177,87 @@ impl Func {
 pub struct Program {
     /// entry -> function
     pub fns: BTreeMap<u32, Func>,
+    /// where flags cross a call, a return or a jump between functions (`flag_crossings`)
+    pub flags: FlagCrossings,
+}
+
+/// The few places where flags pass between functions. MSVC's code passes no flags through
+/// calls and returns, so the lifter stores and loads them only here: across the rest, the
+/// flags are dead and a call costs 10 fewer memory accesses on each side.
+#[derive(Default)]
+pub struct FlagCrossings {
+    /// entries that read a flag before writing it (reached by jumps from other functions)
+    pub read_at_entry: HashSet<u32>,
+    /// call sites (the call's address) whose code reads a flag the callee returned
+    pub read_after_call: HashSet<u32>,
+    /// functions whose returns pass flags back: called from `read_after_call` sites, and the
+    /// functions they jump on to
+    pub returned: HashSet<u32>,
+}
+
+/// The flags the lifter keeps in variables: CF, PF, ZF, SF, OF.
+const LIFTED_FLAGS: u32 = iced_x86::RflagsBits::CF
+    | iced_x86::RflagsBits::PF
+    | iced_x86::RflagsBits::ZF
+    | iced_x86::RflagsBits::SF
+    | iced_x86::RflagsBits::OF;
+
+/// The flags read before they are written on the paths from `start` inside `f`. A path ends at
+/// a call, a return, an indirect jump or a jump out of the function (MSVC passes no flags
+/// there; the jumps out are covered by their targets' own `flags_read_from`).
+pub fn flags_read_from(code: &mut Code, f: &Func, start: u32) -> u32 {
+    let mut read = 0;
+    let mut seen = HashSet::new();
+    let mut work = vec![(start, LIFTED_FLAGS)];
+    while let Some((a, unwritten)) = work.pop() {
+        if unwritten == 0 || !f.ins.contains(&a) || !seen.insert((a, unwritten)) {
+            continue;
+        }
+        let i = code.at(a).unwrap();
+        read |= i.rflags_read() & unwritten;
+        let unwritten = unwritten & !i.rflags_modified();
+        match i.flow_control() {
+            FlowControl::UnconditionalBranch => work.extend(direct_target(&i).map(|t| (t, unwritten))),
+            FlowControl::ConditionalBranch => {
+                work.extend(direct_target(&i).map(|t| (t, unwritten)));
+                work.push((i.next_ip32(), unwritten));
+            }
+            FlowControl::Next => work.push((i.next_ip32(), unwritten)),
+            _ => {}
+        }
+    }
+    read
+}
+
+/// Where flags cross between functions (`FlagCrossings`).
+fn flag_crossings(code: &mut Code, fns: &BTreeMap<u32, Func>) -> FlagCrossings {
+    let mut x = FlagCrossings::default();
+    let mut callees = Vec::new();
+    for f in fns.values() {
+        if flags_read_from(code, f, f.entry) != 0 {
+            x.read_at_entry.insert(f.entry);
+        }
+        for &a in &f.ins {
+            let i = code.at(a).unwrap();
+            if matches!(i.flow_control(), FlowControl::Call | FlowControl::IndirectCall)
+                && flags_read_from(code, f, i.next_ip32()) != 0
+            {
+                x.read_after_call.insert(a);
+                // an indirect call with live flags after it would need every return to pass
+                // them: none in Gunmetal.exe
+                assert!(direct_target(&i).is_some(), "flags read after the indirect call at {a:#x}");
+                callees.extend(direct_target(&i));
+            }
+        }
+    }
+    // a function returning flags may end in a jump to another one, whose return passes them on
+    while let Some(t) = callees.pop() {
+        let Some(f) = fns.get(&t) else { continue };
+        if x.returned.insert(t) {
+            callees.extend(f.targets.iter().copied().filter(|&j| !f.ins.contains(&j)));
+        }
+    }
+    x
 }
 
 impl Program {
@@ -222,7 +303,8 @@ impl Program {
             }
             todo = next;
         }
-        Program { fns }
+        let flags = flag_crossings(code, &fns);
+        Program { fns, flags }
     }
 }
 
