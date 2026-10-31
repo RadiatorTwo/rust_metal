@@ -318,7 +318,10 @@ pub fn pump(wait: Duration) {
 /// `restore` (the real window minimised, which also takes the focus, or restored and brought
 /// to the front), `lose*2000` (the Direct3D device lost for 2000 ms, then waiting for the
 /// game's Reset), `poke@511fc0=1` (a dword written to guest memory, hex address and value),
-/// `text@Name` (typed characters, `_` a space).
+/// `text@Name` (typed characters, `_` a space), `motion@dx,dy` (raw mouse movement),
+/// `wheel@n` (notches), `LButton*ms` (a mouse button held; RButton, MButton, XButton1, XButton2).
+/// `GUNMETAL_INPUT=@file.txt` reads the items from a file (as `GUNMETAL_RECORD` writes them,
+/// `record`); `#` starts a comment to the end of the line.
 /// Items `t<N>:<what>` are tick-indexed: delivered at the start of mission tick N
 /// (`tick_inputs`, from `ticks::part_start`), not at a time. Their durations are ticks of 40 ms:
 /// a key held 3 ticks or `*n` ticks, a click's button down 1 tick after the move and up 3
@@ -328,7 +331,7 @@ pub fn pump(wait: Duration) {
 fn scripted(app: &mut App) {
     static SCRIPT: Mutex<Option<VecDeque<(u64, Input)>>> = Mutex::new(None);
     let mut s = SCRIPT.lock().unwrap();
-    let script = s.get_or_insert_with(|| std::env::var("GUNMETAL_INPUT").map(|v| parse_script(&v).ms).unwrap_or_default());
+    let script = s.get_or_insert_with(|| script_text().map(|v| parse_script(&v).ms).unwrap_or_default());
     let now = super::kernel32::start_time().elapsed().as_millis() as u64;
     while script.front().is_some_and(|e| e.0 <= now) {
         match script.pop_front().unwrap().1 {
@@ -363,7 +366,16 @@ static TICK_SCRIPT: Mutex<Option<VecDeque<(u64, Input)>>> = Mutex::new(None);
 
 fn with_tick_script<R>(f: impl FnOnce(&mut VecDeque<(u64, Input)>) -> R) -> R {
     let mut s = TICK_SCRIPT.lock().unwrap();
-    f(s.get_or_insert_with(|| std::env::var("GUNMETAL_INPUT").map(|v| parse_script(&v).ticks).unwrap_or_default()))
+    f(s.get_or_insert_with(|| script_text().map(|v| parse_script(&v).ticks).unwrap_or_default()))
+}
+
+/// `GUNMETAL_INPUT`'s items, or with `@file` that file's (as `GUNMETAL_RECORD` writes it).
+fn script_text() -> Option<String> {
+    let v = std::env::var("GUNMETAL_INPUT").ok()?;
+    match v.strip_prefix('@') {
+        Some(path) => std::fs::read_to_string(path).map_err(|e| eprintln!("GUNMETAL_INPUT: cannot read {path}: {e}")).ok(),
+        None => Some(v),
+    }
 }
 
 /// The script has tick-indexed items.
@@ -385,7 +397,8 @@ pub fn tick_inputs(tick: u64) -> Vec<Input> {
 /// `GUNMETAL_INPUT`'s text as events (see `scripted`).
 pub fn parse_script(text: &str) -> Script {
     let (mut ms, mut ticks) = (Vec::new(), Vec::new());
-    for item in text.split_whitespace() {
+    // `#` starts a comment to the end of the line
+    for item in text.lines().flat_map(|l| l.split('#').next().unwrap_or("").split_whitespace()) {
         let Some((t, what)) = item.split_once(':') else { continue };
         let (tick, t) = match t.strip_prefix('t') {
             Some(n) => (true, n),
@@ -409,6 +422,12 @@ pub fn parse_script(text: &str) -> Script {
             if let Some((a, v)) = p.split_once('=').and_then(|(a, v)| Some((hex(a)?, hex(v)?))) {
                 ev.push((t, Input::Poke(a, v)));
             }
+        } else if let Some(xy) = what.strip_prefix("motion@") {
+            // raw mouse movement (as recorded)
+            let Some((x, y)) = at(xy) else { continue };
+            ev.push((t, Input::Motion(x, y)));
+        } else if let Some(n) = what.strip_prefix("wheel@").and_then(|n| n.parse().ok()) {
+            ev.push((t, Input::Wheel(n)));
         } else if let Some((b, xy)) = what.split_once('@') {
             let Some((x, y)) = at(xy) else { continue };
             ev.push((t, Input::Move(x, y)));
@@ -431,6 +450,12 @@ pub fn parse_script(text: &str) -> Script {
             ev.push((t, Input::Stall(ms)));
         } else {
             let (name, hold) = what.split_once('*').map_or((what, hold), |(n, h)| (n, h.parse().unwrap_or(hold)));
+            // a mouse button held (as recorded)
+            if let Some(b) = ["LButton", "RButton", "MButton", "XButton1", "XButton2"].iter().position(|&n| n == name) {
+                ev.push((t, Input::Button(b as u8, true)));
+                ev.push((t + hold, Input::Button(b as u8, false)));
+                continue;
+            }
             let Some((vk, scan)) = key_by_name(name).and_then(vk_of) else {
                 eprintln!("GUNMETAL_INPUT: unknown key {name}");
                 continue;
@@ -489,6 +514,7 @@ fn key_by_name(n: &str) -> Option<KeyCode> {
         "Ctrl" => ControlLeft,
         "Alt" => AltLeft,
         "Shift" => ShiftLeft,
+        "Backspace" => Backspace,
         _ => return None,
     })
 }
@@ -598,6 +624,7 @@ impl App {
 
     /// Input from the real window, for the game unless a script drives this run.
     fn real(&mut self, i: Input) {
+        super::record::input(&i);
         if reaches_game(&i, scripted_run()) {
             self.input.push_back(i);
         }
@@ -679,6 +706,13 @@ impl ApplicationHandler for App {
                             w.set_fullscreen((!full).then(|| borderless(w)));
                             super::display::remember_fullscreen(!full);
                         }
+                    }
+                    return;
+                }
+                // F11 while recording: a mark, not for the game
+                if super::record::on() && event.physical_key == PhysicalKey::Code(KeyCode::F11) {
+                    if down && !event.repeat {
+                        super::record::mark();
                     }
                     return;
                 }

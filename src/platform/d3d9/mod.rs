@@ -16,7 +16,7 @@
 pub mod device;
 pub mod ex;
 pub mod resources;
-mod shot;
+pub mod shot;
 pub mod types;
 
 use super::{Import, arg, com, log, mem, method_not_implemented as NI};

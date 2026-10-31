@@ -200,7 +200,8 @@ fn with<R>(f: impl FnOnce(&mut Ticks) -> R) -> Option<R> {
 pub fn init() {
     let print = std::env::var_os("GUNMETAL_TICK_PRINT").filter(|p| !p.is_empty());
     let probe = std::env::var_os("GUNMETAL_TICK_PROBE").is_some_and(|v| !v.is_empty() && v != "0");
-    let input = super::window::has_tick_inputs();
+    // tick-indexed input, played or recorded
+    let input = super::window::has_tick_inputs() || super::record::on();
     if print.is_none() && !probe && !input {
         return;
     }
@@ -225,6 +226,15 @@ pub fn init() {
     if let Some(p) = print {
         log!("ticks: fingerprints to {}", std::path::Path::new(&p).display());
     }
+}
+
+/// The mission tick the game is at (the last one started), when the tick aids are on and a
+/// mission runs.
+pub fn mission_tick() -> Option<u32> {
+    if !on() || !in_mission() {
+        return None;
+    }
+    with(|s| s.tick).flatten()
 }
 
 fn in_mission() -> bool {

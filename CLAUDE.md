@@ -268,7 +268,11 @@ How the game starts (`GUNMETAL_TRACE_API=1` shows every import call):
 
 Env: `GUNMETAL_TRACE_API` (imports with arguments), `GUNMETAL_TRACE_REG`, `GUNMETAL_TRACE_MSG`,
 `GUNMETAL_INPUT` (scripted input, see `window.rs`; real keyboard and mouse ignored; items
-`t<N>:<what>` are delivered at the start of mission tick N, durations in ticks),
+`t<N>:<what>` are delivered at the start of mission tick N, durations in ticks; `@file.txt` reads
+them from a file, `#` comments), `GUNMETAL_RECORD=file.txt` (`record.rs`: the player's input as
+such items, ms outside missions and mission ticks in them: keys and mouse buttons with their
+hold, raw motion summed per tick or 50 ms as `motion@dx,dy`, `wheel@n`, focus, close; F11 writes a
+mark comment and `file.txt.<ms>.png`),
 `GUNMETAL_WINDOW=WxH`, `GUNMETAL_MONITOR=n`, `GUNMETAL_WATCH` (where the game is, every 2 s),
 `GUNMETAL_PROF`, `GUNMETAL_SAMPLE`, `GUNMETAL_STEPS`, `GUNMETAL_TRACE_ROUTER`, `GUNMETAL_TRACE_LIFE`, `GUNMETAL_NO_MF` (music off),
 `GUNMETAL_COUNT=<file>`, `GUNMETAL_FRAMES=<file>` (per picture: Present time, interval, time to

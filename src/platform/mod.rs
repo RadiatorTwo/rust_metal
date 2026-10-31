@@ -27,6 +27,7 @@ pub mod mf;
 #[cfg(windows)]
 pub mod music;
 pub mod ole32;
+pub mod record;
 pub mod router;
 pub mod sample;
 pub mod ticks;

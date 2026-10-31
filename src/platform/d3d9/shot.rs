@@ -22,11 +22,20 @@ fn every() -> Duration {
 
 static LAST: Mutex<Option<Instant>> = Mutex::new(None);
 
+/// A picture asked for once (`request`).
+static REQUESTED: Mutex<Option<String>> = Mutex::new(None);
+
+/// Write the next picture to `file` (a mark of `GUNMETAL_RECORD`).
+pub fn request(file: String) {
+    *lock(&REQUESTED) = Some(file);
+}
+
 /// Before Present on the host device `dev`: write the back buffer (`back`, the game's own on
 /// 9Ex; else the swap chain's) if a picture is due.
 pub fn before_present(dev: *mut c_void, back: Option<*mut c_void>) {
-    let Some(path) = path() else { return };
-    {
+    let requested = lock(&REQUESTED).take();
+    let Some(path) = requested.as_ref().or(path()) else { return };
+    if requested.is_none() {
         let mut last = lock(&LAST);
         if last.is_some_and(|t| t.elapsed() < every()) {
             return;
@@ -41,6 +50,9 @@ pub fn before_present(dev: *mut c_void, back: Option<*mut c_void>) {
         Ok((px, w, h)) => {
             let t = kernel32::start_time().elapsed().as_millis();
             let file = path.replace("{t}", &format!("{t:06}"));
+            if requested.is_some() {
+                log!("picture written to {file}");
+            }
             if let Err(e) = std::fs::write(&file, png(&px, w, h)) {
                 log!("warn: GUNMETAL_SHOT {file}: {e}");
             }
