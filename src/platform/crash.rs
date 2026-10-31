@@ -41,7 +41,8 @@ pub enum Kind {
     Timer = 3,
 }
 
-/// One guest thread as the report knows it (all 0: no thread).
+/// One guest thread as the report knows it (all 0: a free slot; tid 0 marks it free, since
+/// our thread ids start at 1, `kernel32::thread_id`).
 struct Slot {
     tid: AtomicU32,
     kind: AtomicU32,
@@ -211,6 +212,13 @@ fn thread_line(s: &Slot) -> String {
     format!("thread {} ({kind}, start {})", s.tid.load(Ordering::Relaxed), crate::image::named(s.start.load(Ordering::Relaxed)))
 }
 
+/// `GUNMETAL_TRACE_LIFE`: how the game's run goes and ends, as "game: ..." lines: the main
+/// loop's step returning false, WM_CLOSE/WM_DESTROY/WM_QUIT/WM_ENDSESSION reaching the window
+/// procedure, the loader thread's start and each change of its state, game_shutdown. Not
+/// installed without it (`platform::hooks`).
+pub const LIFE_HOOKS: [(u32, crate::rt::Hook); 5] =
+    [(FRAME_STEP, frame_step), (LOADER_POLL, loader_poll), (SHUTDOWN, shutdown), (WND_PROC, wnd_proc), (LOADER_START, loader_start)];
+
 /// The game's step of its main loop (WinMain 0x57a9b0): false makes WinMain send WM_CLOSE
 /// and shut down (0x45c430).
 pub const FRAME_STEP: u32 = 0x45c770;
@@ -245,9 +253,10 @@ pub fn frame_step(c: &mut Cpu) {
 }
 
 pub fn loader_poll(c: &mut Cpu) {
+    static LAST: AtomicU32 = AtomicU32::new(0);
     call_original(c, LOADER_POLL);
     let r = c.r[crate::rt::EAX];
-    if r >= 2 {
+    if LAST.swap(r, Ordering::Relaxed) != r {
         log!("game: the loader thread's state {r} at {} ms", super::kernel32::ms_since_start());
     }
 }

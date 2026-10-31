@@ -546,6 +546,10 @@ static LAST_CALL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::n
 pub fn guest_readable(a: u32, n: u32) -> bool {
     use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_NOACCESS, VirtualQuery};
     let (mut at, end) = (a as u64, a as u64 + n as u64);
+    // past the guest's 4 GB
+    if end > 1 << 32 {
+        return false;
+    }
     while at < end {
         let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
         let p = unsafe { mem().base.add(at as usize) };
@@ -833,18 +837,24 @@ fn find_import(dll: &str, name: &str) -> Option<&'static Import> {
     table.iter().find(|i| i.0 == name)
 }
 
+/// The hooks of this run: `HOOKS`, and with `GUNMETAL_TRACE_LIFE` set also the game's life
+/// trace (`crash::LIFE_HOOKS`). The compiled code depends on the set (main.rs keys its cache
+/// with it).
+pub fn hooks() -> Vec<(u32, crate::rt::Hook)> {
+    let mut h = HOOKS.to_vec();
+    if std::env::var_os("GUNMETAL_TRACE_LIFE").is_some() {
+        h.extend_from_slice(&crash::LIFE_HOOKS);
+    }
+    h
+}
+
 /// Game functions replaced by our own (`jit::compile`).
 pub const HOOKS: &[(u32, crate::rt::Hook)] = &{
-    const N: usize = 8 + fps::HOOKS.len() + video::HOOKS.len() + hud::HOOKS.len() + router::HOOKS.len();
+    const N: usize = 3 + fps::HOOKS.len() + video::HOOKS.len() + hud::HOOKS.len() + router::HOOKS.len();
     let mut h: [(u32, crate::rt::Hook); N] = [(crt::FTOL, crt::ftol); N];
     h[1] = (crt::GAME_WARNING, crt::game_warning);
     h[2] = (crash::AMSG_EXIT, crash::amsg_exit);
-    h[3] = (crash::FRAME_STEP, crash::frame_step);
-    h[4] = (crash::LOADER_POLL, crash::loader_poll);
-    h[5] = (crash::SHUTDOWN, crash::shutdown);
-    h[6] = (crash::WND_PROC, crash::wnd_proc);
-    h[7] = (crash::LOADER_START, crash::loader_start);
-    let mut n = 8;
+    let mut n = 3;
     let mut i = 0;
     while i < fps::HOOKS.len() {
         h[n] = fps::HOOKS[i];

@@ -36,8 +36,9 @@ fn run() -> i32 {
     let found = t.elapsed().as_millis();
     // the machine code is kept in the game folder, for this program and this file
     let cache = dir.join("compiled.bin");
-    let key = cache_key(&game);
-    let compiled = compile_cached(&prog, &smc, &mut code, rust_metal::platform::HOOKS, key.map(|k| (cache.as_path(), k)));
+    let hooks = rust_metal::platform::hooks();
+    let key = cache_key(&game, &hooks);
+    let compiled = compile_cached(&prog, &smc, &mut code, &hooks, key.map(|k| (cache.as_path(), k)));
     let st = &compiled.stats;
     if st.cached {
         eprintln!("compiled code of {} functions loaded in {} ms", st.functions, t.elapsed().as_millis());
@@ -57,10 +58,14 @@ fn run() -> i32 {
 
 /// What the compiled code depends on: this program (any change to the recompiler) and the
 /// game's file. None when our own file cannot be read.
-fn cache_key(game: &Game) -> Option<[u8; 32]> {
+fn cache_key(game: &Game, hooks: &[(u32, rust_metal::rt::Hook)]) -> Option<[u8; 32]> {
     let own = std::fs::read(std::env::current_exe().ok()?).ok()?;
     let mut h = Sha256::new();
     h.update(&own);
     h.update(&game.all.data);
+    // which functions are hooked changes the compiled code (GUNMETAL_TRACE_LIFE)
+    for (a, _) in hooks {
+        h.update(a.to_le_bytes());
+    }
     Some(h.finalize().into())
 }

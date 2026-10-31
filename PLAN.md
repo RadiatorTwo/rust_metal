@@ -201,10 +201,10 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
       In a running mission the router's lists (0x503440) remove those objects earlier.
       The fix: while a router is being destroyed, removing an id whose container it already
       deleted is skipped (returns "not found"; logged as "game: id ... skipped"). The 1-in-10
-      catches came from scripts closing at 62 s when the mission start ran late. Also: the
-      main loop's step returning false, WM_CLOSE/WM_DESTROY, the loader thread's state and
-      game_shutdown are logged ("game: ..."); `GUNMETAL_TRACE_ROUTER=1` logs the router's
-      handler deletions. Report: `.superpowers/perf/task-r6025-report.md`
+      catches came from scripts closing at 62 s when the mission start ran late. Also:
+      `GUNMETAL_TRACE_LIFE=1` logs the main loop's step returning false, WM_CLOSE/WM_DESTROY,
+      the loader thread's state changes and game_shutdown ("game: ..."); `GUNMETAL_TRACE_ROUTER=1`
+      logs the router's handler deletions. Report: `.superpowers/perf/task-r6025-report.md`
 - [ ] Resolution, still open: the door transition is stretched to a wider back buffer; the
       menu background's scrolling text shows faintly beside the 4:3 middle; the radar is
       wider than round (it follows the screen's width); our own resolution setting (the
