@@ -703,6 +703,8 @@ fn buffer_size(p: *mut c_void, v: &IDirect3DVertexBuffer9_Vtbl) -> Result<u32, w
 /// Lock(offset, size, out pointer, flags): size 0 is the rest of the buffer. The guest buffer
 /// covers the whole buffer and is kept between locks; the game gets the lock's offset in it.
 fn buffer_lock(c: &mut Cpu) -> u32 {
+    // not recorded yet: the calls recorded before go first
+    super::queue::flush();
     let (p, v) = buf(c);
     let (this, offset, size, out, flags) = (arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4));
     let total = match buffer_size(p, v) {
@@ -729,6 +731,8 @@ fn buffer_lock(c: &mut Cpu) -> u32 {
 }
 
 fn buffer_unlock(c: &mut Cpu) -> u32 {
+    // not recorded yet: the calls recorded before go first
+    super::queue::flush();
     let (p, v) = buf(c);
     end_lock(arg(c, 0), 0);
     hr(unsafe { (v.Unlock)(p) })
@@ -795,6 +799,8 @@ fn query_get_data_size(c: &mut Cpu) -> u32 {
 }
 
 fn query_issue(c: &mut Cpu) -> u32 {
+    // not recorded yet: the calls recorded before go first
+    super::queue::flush();
     let (p, v) = query(c);
     hr(unsafe { (v.Issue)(p, arg(c, 1)) })
 }

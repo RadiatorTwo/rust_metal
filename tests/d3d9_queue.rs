@@ -103,3 +103,20 @@ fn release_waits_for_recorded_use() {
     // the host's Release would run here
     assert!(used.load(Ordering::SeqCst));
 }
+
+/// A recorded call's data is a copy taken when it is recorded: the game may change its bytes
+/// right after the call returns.
+#[test]
+fn copy_in_takes_a_snapshot() {
+    use rust_metal::platform::d3d9::device::copy_in;
+    use rust_metal::platform::{alloc, init_memory};
+    let m = init_memory();
+    let a = alloc(64);
+    for k in 0..64u32 {
+        m.slice(a + k, 1)[0] = k as u8 + 1;
+    }
+    let copy = copy_in(a, 64).unwrap();
+    m.slice(a, 64).fill(0);
+    assert_eq!(&copy[..], &(1..=64u8).collect::<Vec<_>>()[..]);
+    assert!(copy_in(0, 64).is_none());
+}

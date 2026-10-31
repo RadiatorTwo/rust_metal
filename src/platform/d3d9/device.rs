@@ -51,6 +51,54 @@ macro_rules! pass {
     };
 }
 
+/// A method recorded for the worker thread when the queue is on (`queue`), else called at
+/// once: `queued!(name, Method, |c| { captures } (call args))`. The captures are taken when
+/// the game calls (guest data copied with `copy_in`, guest objects resolved with `host_of`);
+/// the call's arguments are built from them on the worker. Returns D3D_OK when recorded; the
+/// worker logs a failure once per method.
+macro_rules! queued {
+    ($f:ident, $m:ident, |$c:ident| { $($n:ident = $a:expr),* } ($($b:expr),*)) => {
+        fn $f($c: &mut Cpu) -> u32 {
+            let (p, v) = dv($c);
+            let (p, f) = (p as usize, v.$m);
+            $(let $n = $a;)*
+            let call = move || unsafe { f(p as *mut c_void, $($b),*) };
+            match super::queue::global() {
+                None => hr(call()),
+                Some(q) => {
+                    q.record(Box::new(move || {
+                        let r = call();
+                        if r.is_err() {
+                            worker_failed(stringify!($m), r);
+                        }
+                    }));
+                    0
+                }
+            }
+        }
+    };
+}
+
+/// A copy of guest bytes [a, a + n) for a recorded call (None for a null pointer).
+pub fn copy_in(a: u32, n: usize) -> Option<Box<[u8]>> {
+    (a != 0).then(|| mem().slice(a, n).into())
+}
+
+/// The pointer a recorded call passes for a copy (null for none).
+fn ptr<T>(b: &Option<Box<[u8]>>) -> *const T {
+    b.as_ref().map_or(std::ptr::null(), |b| b.as_ptr() as *const T)
+}
+
+/// A recorded call failed on the worker: logged once per method.
+fn worker_failed(what: &'static str, r: windows::core::HRESULT) {
+    static SEEN: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let mut seen = crate::platform::lock(&SEEN);
+    if !seen.contains(&what) {
+        seen.push(what);
+        log!("d3d9 worker: {what} -> {:#x}", r.0);
+    }
+}
+
 /// Release: at 0 the device is gone (`d3d9::device` null).
 fn device_release(c: &mut Cpu) -> u32 {
     let host = com::host(arg(c, 0));
@@ -192,6 +240,8 @@ pub fn cooperative_level(host: u32, until: Option<std::time::Instant>, now: std:
 /// TestCooperativeLevel, called by the game every frame (frame_begin 0x46f590). A change of
 /// its answer is logged: the device lost, ready for a Reset, or fine.
 fn test_cooperative_level(c: &mut Cpu) -> u32 {
+    // not recorded yet: the calls recorded before go first
+    super::queue::flush();
     static LAST: AtomicU32 = AtomicU32::new(0);
     let (p, v) = dv(c);
     let host = hr(unsafe { (v.TestCooperativeLevel)(p) });
@@ -213,6 +263,8 @@ fn test_cooperative_level(c: &mut Cpu) -> u32 {
 /// GUNMETAL_SHOT first when one is due. Without a rectangle of the game's, the picture keeps
 /// its aspect ratio in our window (`letterbox`).
 fn present(c: &mut Cpu) -> u32 {
+    // not recorded yet: the calls recorded before go first
+    super::queue::flush();
     let (p, v) = dv(c);
     let frames = crate::platform::frames::on();
     if frames {
@@ -308,37 +360,52 @@ pass!(get_device_caps, GetDeviceCaps, |c| (gp(arg(c, 1))));
 pass!(get_display_mode, GetDisplayMode, |c| (arg(c, 1), gp(arg(c, 2))));
 pass!(get_raster_status, GetRasterStatus, |c| (arg(c, 1), gp(arg(c, 2))));
 pass!(set_dialog_box_mode, SetDialogBoxMode, |c| (BOOL(arg(c, 1) as i32)));
-pass!(begin_scene, BeginScene, |c| ());
-pass!(end_scene, EndScene, |c| ());
+queued!(begin_scene, BeginScene, |c| {} ());
+queued!(end_scene, EndScene, |c| {} ());
 // Clear(count, rects, flags, colour, z, stencil): z is a float
-pass!(clear, Clear, |c| (arg(c, 1), cp(arg(c, 2)), arg(c, 3), arg(c, 4), f32::from_bits(arg(c, 5)), arg(c, 6)));
-pass!(set_transform, SetTransform, |c| (D3DTRANSFORMSTATETYPE(arg(c, 1) as i32), cp(arg(c, 2))));
+queued!(clear, Clear, |c| { n = arg(c, 1), rects = copy_in(arg(c, 2), 16 * arg(c, 1) as usize), flags = arg(c, 3), color = arg(c, 4), z = arg(c, 5), st = arg(c, 6) } (n, ptr(&rects), flags, color, f32::from_bits(z), st));
+queued!(set_transform, SetTransform, |c| { t = arg(c, 1), m = copy_in(arg(c, 2), 64) } (D3DTRANSFORMSTATETYPE(t as i32), ptr(&m)));
 pass!(get_transform, GetTransform, |c| (D3DTRANSFORMSTATETYPE(arg(c, 1) as i32), gp(arg(c, 2))));
 pass!(multiply_transform, MultiplyTransform, |c| (D3DTRANSFORMSTATETYPE(arg(c, 1) as i32), cp(arg(c, 2))));
-pass!(set_viewport, SetViewport, |c| (cp(arg(c, 1))));
+queued!(set_viewport, SetViewport, |c| { vp = copy_in(arg(c, 1), 24) } (ptr(&vp)));
 pass!(get_viewport, GetViewport, |c| (gp(arg(c, 1))));
-pass!(set_material, SetMaterial, |c| (cp(arg(c, 1))));
+queued!(set_material, SetMaterial, |c| { m = copy_in(arg(c, 1), 68) } (ptr(&m)));
 pass!(get_material, GetMaterial, |c| (gp(arg(c, 1))));
-pass!(set_light, SetLight, |c| (arg(c, 1), cp(arg(c, 2))));
+queued!(set_light, SetLight, |c| { i = arg(c, 1), l = copy_in(arg(c, 2), 104) } (i, ptr(&l)));
 pass!(get_light, GetLight, |c| (arg(c, 1), gp(arg(c, 2))));
-pass!(light_enable, LightEnable, |c| (arg(c, 1), BOOL(arg(c, 2) as i32)));
+queued!(light_enable, LightEnable, |c| { i = arg(c, 1), on = arg(c, 2) } (i, BOOL(on as i32)));
 pass!(get_light_enable, GetLightEnable, |c| (arg(c, 1), gp(arg(c, 2))));
-pass!(set_clip_plane, SetClipPlane, |c| (arg(c, 1), cp(arg(c, 2))));
+queued!(set_clip_plane, SetClipPlane, |c| { i = arg(c, 1), pl = copy_in(arg(c, 2), 16) } (i, ptr(&pl)));
 pass!(get_clip_plane, GetClipPlane, |c| (arg(c, 1), gp(arg(c, 2))));
-pass!(set_render_state, SetRenderState, |c| (D3DRENDERSTATETYPE(arg(c, 1) as i32), arg(c, 2)));
-pass!(get_render_state, GetRenderState, |c| (D3DRENDERSTATETYPE(arg(c, 1) as i32), gp(arg(c, 2))));
+queued!(set_render_state, SetRenderState, |c| { k = arg(c, 1), x = arg(c, 2) } (D3DRENDERSTATETYPE(k as i32), x));
+fn get_render_state(c: &mut Cpu) -> u32 {
+    // not recorded yet: the calls recorded before go first
+    super::queue::flush();
+    let (p, v) = dv(c);
+    hr(unsafe { (v.GetRenderState)(p, D3DRENDERSTATETYPE(arg(c, 1) as i32), gp(arg(c, 2))) })
+}
 pass!(set_clip_status, SetClipStatus, |c| (cp(arg(c, 1))));
 pass!(get_clip_status, GetClipStatus, |c| (gp(arg(c, 1))));
-pass!(get_texture_stage_state, GetTextureStageState, |c| (arg(c, 1), D3DTEXTURESTAGESTATETYPE(arg(c, 2) as i32), gp(arg(c, 3))));
-pass!(set_texture_stage_state, SetTextureStageState, |c| (arg(c, 1), D3DTEXTURESTAGESTATETYPE(arg(c, 2) as i32), arg(c, 3)));
-pass!(get_sampler_state, GetSamplerState, |c| (arg(c, 1), D3DSAMPLERSTATETYPE(arg(c, 2) as i32), gp(arg(c, 3))));
-pass!(set_sampler_state, SetSamplerState, |c| (arg(c, 1), D3DSAMPLERSTATETYPE(arg(c, 2) as i32), arg(c, 3)));
+fn get_texture_stage_state(c: &mut Cpu) -> u32 {
+    // not recorded yet: the calls recorded before go first
+    super::queue::flush();
+    let (p, v) = dv(c);
+    hr(unsafe { (v.GetTextureStageState)(p, arg(c, 1), D3DTEXTURESTAGESTATETYPE(arg(c, 2) as i32), gp(arg(c, 3))) })
+}
+queued!(set_texture_stage_state, SetTextureStageState, |c| { st = arg(c, 1), k = arg(c, 2), x = arg(c, 3) } (st, D3DTEXTURESTAGESTATETYPE(k as i32), x));
+fn get_sampler_state(c: &mut Cpu) -> u32 {
+    // not recorded yet: the calls recorded before go first
+    super::queue::flush();
+    let (p, v) = dv(c);
+    hr(unsafe { (v.GetSamplerState)(p, arg(c, 1), D3DSAMPLERSTATETYPE(arg(c, 2) as i32), gp(arg(c, 3))) })
+}
+queued!(set_sampler_state, SetSamplerState, |c| { s = arg(c, 1), k = arg(c, 2), x = arg(c, 3) } (s, D3DSAMPLERSTATETYPE(k as i32), x));
 pass!(validate_device, ValidateDevice, |c| (gp(arg(c, 1))));
-pass!(set_scissor_rect, SetScissorRect, |c| (cp(arg(c, 1))));
+queued!(set_scissor_rect, SetScissorRect, |c| { r = copy_in(arg(c, 1), 16) } (ptr(&r)));
 pass!(get_scissor_rect, GetScissorRect, |c| (gp(arg(c, 1))));
 pass!(set_software_vertex_processing, SetSoftwareVertexProcessing, |c| (BOOL(arg(c, 1) as i32)));
 pass!(set_npatch_mode, SetNPatchMode, |c| (f32::from_bits(arg(c, 1))));
-pass!(set_fvf, SetFVF, |c| (arg(c, 1)));
+queued!(set_fvf, SetFVF, |c| { fvf = arg(c, 1) } (fvf));
 pass!(get_fvf, GetFVF, |c| (gp(arg(c, 1))));
 
 // ---- resources (`resources`) ----
@@ -389,9 +456,9 @@ fn create_query(c: &mut Cpu) -> u32 {
     resources::created(r, q, resources::QUERY, out, "CreateQuery")
 }
 
-pass!(set_texture, SetTexture, |c| (arg(c, 1), resources::host_of(arg(c, 2))));
-pass!(set_stream_source, SetStreamSource, |c| (arg(c, 1), resources::host_of(arg(c, 2)), arg(c, 3), arg(c, 4)));
-pass!(set_indices, SetIndices, |c| (resources::host_of(arg(c, 1))));
+queued!(set_texture, SetTexture, |c| { st = arg(c, 1), t = resources::host_of(arg(c, 2)) as usize } (st, t as _));
+queued!(set_stream_source, SetStreamSource, |c| { s = arg(c, 1), b = resources::host_of(arg(c, 2)) as usize, off = arg(c, 3), stride = arg(c, 4) } (s, b as _, off, stride));
+queued!(set_indices, SetIndices, |c| { b = resources::host_of(arg(c, 1)) as usize } (b as _));
 // PALETTEENTRY: 4 bytes
 pass!(set_palette_entries, SetPaletteEntries, |c| (arg(c, 1), cp(arg(c, 2))));
 pass!(get_palette_entries, GetPaletteEntries, |c| (arg(c, 1), gp(arg(c, 2))));
@@ -538,8 +605,8 @@ fn get_texture(c: &mut Cpu) -> u32 {
 
 // ---- drawing ----
 
-pass!(draw_primitive, DrawPrimitive, |c| (D3DPRIMITIVETYPE(arg(c, 1) as i32), arg(c, 2), arg(c, 3)));
-pass!(draw_indexed_primitive, DrawIndexedPrimitive, |c| (D3DPRIMITIVETYPE(arg(c, 1) as i32), arg(c, 2) as i32, arg(c, 3), arg(c, 4), arg(c, 5), arg(c, 6)));
+queued!(draw_primitive, DrawPrimitive, |c| { ty = arg(c, 1), start = arg(c, 2), n = arg(c, 3) } (D3DPRIMITIVETYPE(ty as i32), start, n));
+queued!(draw_indexed_primitive, DrawIndexedPrimitive, |c| { ty = arg(c, 1), base = arg(c, 2), min = arg(c, 3), nv = arg(c, 4), start = arg(c, 5), n = arg(c, 6) } (D3DPRIMITIVETYPE(ty as i32), base as i32, min, nv, start, n));
 
 /// A *UP draw's arrays not all in guest memory: logged, D3DERR_INVALIDCALL.
 fn up_refused(what: &str, a: u32, n: u32) -> bool {
@@ -558,6 +625,17 @@ fn draw_primitive_up(c: &mut Cpu) -> u32 {
     if up_refused("DrawPrimitiveUP", data, resources::primitive_vertices(ty, count).saturating_mul(stride)) {
         return resources::D3DERR_INVALIDCALL;
     }
+    let n = resources::primitive_vertices(ty, count).saturating_mul(stride) as usize;
+    if let Some(q) = super::queue::global() {
+        let (p, f, vertices) = (p as usize, v.DrawPrimitiveUP, copy_in(data, n));
+        q.record(Box::new(move || {
+            let r = unsafe { f(p as *mut c_void, D3DPRIMITIVETYPE(ty as i32), count, ptr(&vertices), stride) };
+            if r.is_err() {
+                worker_failed("DrawPrimitiveUP", r);
+            }
+        }));
+        return 0;
+    }
     hr(unsafe { (v.DrawPrimitiveUP)(p, D3DPRIMITIVETYPE(ty as i32), count, cp(data), stride) })
 }
 
@@ -573,6 +651,17 @@ fn draw_indexed_primitive_up(c: &mut Cpu) -> u32 {
         || up_refused("DrawIndexedPrimitiveUP vertices", data, min.saturating_add(nv).saturating_mul(stride))
     {
         return resources::D3DERR_INVALIDCALL;
+    }
+    if let Some(q) = super::queue::global() {
+        let vertex_bytes = min.saturating_add(nv).saturating_mul(stride) as usize;
+        let (p, f, indices, vertices) = (p as usize, v.DrawIndexedPrimitiveUP, copy_in(idx, index_bytes as usize), copy_in(data, vertex_bytes));
+        q.record(Box::new(move || {
+            let r = unsafe { f(p as *mut c_void, D3DPRIMITIVETYPE(ty as i32), min, nv, count, ptr(&indices), D3DFORMAT(fmt), ptr(&vertices), stride) };
+            if r.is_err() {
+                worker_failed("DrawIndexedPrimitiveUP", r);
+            }
+        }));
+        return 0;
     }
     hr(unsafe { (v.DrawIndexedPrimitiveUP)(p, D3DPRIMITIVETYPE(ty as i32), min, nv, count, cp(idx), D3DFORMAT(fmt), cp(data), stride) })
 }
@@ -597,7 +686,7 @@ fn create_vertex_declaration(c: &mut Cpu) -> u32 {
     resources::created(r, d, resources::VERTEX_DECLARATION, arg(c, 2), "CreateVertexDeclaration")
 }
 
-pass!(set_vertex_declaration, SetVertexDeclaration, |c| (h(arg(c, 1))));
+queued!(set_vertex_declaration, SetVertexDeclaration, |c| { d = h(arg(c, 1)) as usize } (d as _));
 
 fn get_vertex_declaration(c: &mut Cpu) -> u32 {
     handed_out(c, arg(c, 1), "GetVertexDeclaration", |o| com::wrap(resources::VERTEX_DECLARATION, o), |p, v, o| unsafe { (v.GetVertexDeclaration)(p, o) })
@@ -619,8 +708,8 @@ fn create_pixel_shader(c: &mut Cpu) -> u32 {
     resources::created(r, s, resources::PIXEL_SHADER, arg(c, 2), "CreatePixelShader")
 }
 
-pass!(set_vertex_shader, SetVertexShader, |c| (h(arg(c, 1))));
-pass!(set_pixel_shader, SetPixelShader, |c| (h(arg(c, 1))));
+queued!(set_vertex_shader, SetVertexShader, |c| { sh = h(arg(c, 1)) as usize } (sh as _));
+queued!(set_pixel_shader, SetPixelShader, |c| { sh = h(arg(c, 1)) as usize } (sh as _));
 
 fn get_vertex_shader(c: &mut Cpu) -> u32 {
     handed_out(c, arg(c, 1), "GetVertexShader", |o| com::wrap(resources::VERTEX_SHADER, o), |p, v, o| unsafe { (v.GetVertexShader)(p, o) })
@@ -631,17 +720,17 @@ fn get_pixel_shader(c: &mut Cpu) -> u32 {
 }
 
 // constants (start register, data, count): floats, ints and BOOLs of 4 bytes, the same layout
-pass!(set_vs_const_f, SetVertexShaderConstantF, |c| (arg(c, 1), cp(arg(c, 2)), arg(c, 3)));
+queued!(set_vs_const_f, SetVertexShaderConstantF, |c| { r = arg(c, 1), d = copy_in(arg(c, 2), 16 * arg(c, 3) as usize), n = arg(c, 3) } (r, ptr(&d), n));
 pass!(get_vs_const_f, GetVertexShaderConstantF, |c| (arg(c, 1), gp(arg(c, 2)), arg(c, 3)));
-pass!(set_vs_const_i, SetVertexShaderConstantI, |c| (arg(c, 1), cp(arg(c, 2)), arg(c, 3)));
+queued!(set_vs_const_i, SetVertexShaderConstantI, |c| { r = arg(c, 1), d = copy_in(arg(c, 2), 16 * arg(c, 3) as usize), n = arg(c, 3) } (r, ptr(&d), n));
 pass!(get_vs_const_i, GetVertexShaderConstantI, |c| (arg(c, 1), gp(arg(c, 2)), arg(c, 3)));
-pass!(set_vs_const_b, SetVertexShaderConstantB, |c| (arg(c, 1), cp(arg(c, 2)), arg(c, 3)));
+queued!(set_vs_const_b, SetVertexShaderConstantB, |c| { r = arg(c, 1), d = copy_in(arg(c, 2), 4 * arg(c, 3) as usize), n = arg(c, 3) } (r, ptr(&d), n));
 pass!(get_vs_const_b, GetVertexShaderConstantB, |c| (arg(c, 1), gp(arg(c, 2)), arg(c, 3)));
-pass!(set_ps_const_f, SetPixelShaderConstantF, |c| (arg(c, 1), cp(arg(c, 2)), arg(c, 3)));
+queued!(set_ps_const_f, SetPixelShaderConstantF, |c| { r = arg(c, 1), d = copy_in(arg(c, 2), 16 * arg(c, 3) as usize), n = arg(c, 3) } (r, ptr(&d), n));
 pass!(get_ps_const_f, GetPixelShaderConstantF, |c| (arg(c, 1), gp(arg(c, 2)), arg(c, 3)));
-pass!(set_ps_const_i, SetPixelShaderConstantI, |c| (arg(c, 1), cp(arg(c, 2)), arg(c, 3)));
+queued!(set_ps_const_i, SetPixelShaderConstantI, |c| { r = arg(c, 1), d = copy_in(arg(c, 2), 16 * arg(c, 3) as usize), n = arg(c, 3) } (r, ptr(&d), n));
 pass!(get_ps_const_i, GetPixelShaderConstantI, |c| (arg(c, 1), gp(arg(c, 2)), arg(c, 3)));
-pass!(set_ps_const_b, SetPixelShaderConstantB, |c| (arg(c, 1), cp(arg(c, 2)), arg(c, 3)));
+queued!(set_ps_const_b, SetPixelShaderConstantB, |c| { r = arg(c, 1), d = copy_in(arg(c, 2), 4 * arg(c, 3) as usize), n = arg(c, 3) } (r, ptr(&d), n));
 pass!(get_ps_const_b, GetPixelShaderConstantB, |c| (arg(c, 1), gp(arg(c, 2)), arg(c, 3)));
 
 // ---- streams ----
