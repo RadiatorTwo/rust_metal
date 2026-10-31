@@ -175,8 +175,10 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
         against 0.23-0.32 ms on average; Present above 2 ms stays rare (6 of 8368). Seen: front
         end, mission, a simulated loss with Reset. To be confirmed by hand: Alt+Enter both
         ways, the Video menu's mode change (Reset), Alt+Tab, the picture's black bars.
-      Next: a cheaper 24-bit rounding path; registers passed between functions in host
-      registers instead of `Cpu`.
+      Tried and dropped too: the eight registers as arguments and results of guest functions
+      (Cranelift's tail convention; logic per tick 3.80 -> 4.5 ms: three go on the stack, the
+      results are shuffled and the caller spills around every call); an integer range check
+      in the 24-bit rounding (no measurable change).
       Found on the way: a device loss in a mission (TestCooperativeLevel lost, not scripted)
       was followed by a null read in 0x47a6b0 (from 0x47a07a): to be looked at.
 - [ ] Frame rate: even frame times (docs/superpowers/plans/2026-10-30-tick-decoupling.md,
