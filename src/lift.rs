@@ -364,6 +364,34 @@ impl<'a, 'f> Lifter<'a, 'f> {
         a
     }
 
+    /// The memory operand as a host pointer and a constant offset for the load or store.
+    /// `[reg+disp]` (no index, no FS, a displacement the game does not rewrite) is
+    /// `mem + reg` with the displacement as the access's offset, one host instruction: the
+    /// sum is not cut to 32 bits, which differs only where reg+disp wraps around 4 GB, an
+    /// address no valid access uses. With an index (MSVC's negative indexes and
+    /// `[dst+src-dst]` copies wrap on purpose) the 32-bit address is computed as `addr` does.
+    fn mem_at(&mut self, i: &Instruction) -> (Value, i32) {
+        let simple = i.memory_base() != Register::None
+            && i.memory_index() == Register::None
+            && i.memory_segment() != Register::FS
+            && !self.smc.disp.contains_key(&i.ip32());
+        if simple {
+            let b = self.reg(gpr(i.memory_base()));
+            (self.host(b), i.memory_displacement32() as i32)
+        } else {
+            let a = self.addr(i);
+            (self.host(a), 0)
+        }
+    }
+    fn load_mem(&mut self, i: &Instruction, t: Type) -> Value {
+        let (p, off) = self.mem_at(i);
+        self.b.ins().load(t, mf(), p, off)
+    }
+    fn store_mem(&mut self, i: &Instruction, v: Value) {
+        let (p, off) = self.mem_at(i);
+        self.b.ins().store(mf(), v, p, off);
+    }
+
     /// A code field the game rewrites, read from guest memory now; narrower fields are
     /// sign-extended like the CPU does.
     fn field(&mut self, f: Field, size: u32) -> Value {
@@ -430,10 +458,7 @@ impl<'a, 'f> Lifter<'a, 'f> {
     fn rd(&mut self, i: &Instruction, k: u32, size: u32) -> Value {
         match i.op_kind(k) {
             OpKind::Register => self.read_reg(i.op_register(k)),
-            OpKind::Memory => {
-                let a = self.addr(i);
-                self.load(a, size)
-            }
+            OpKind::Memory => self.load_mem(i, ty(size)),
             _ => {
                 if let Some(v) = self.dyn_imm(i, size) {
                     return v;
@@ -448,10 +473,7 @@ impl<'a, 'f> Lifter<'a, 'f> {
     fn wr(&mut self, i: &Instruction, k: u32, v: Value) {
         match i.op_kind(k) {
             OpKind::Register => self.write_reg(i.op_register(k), v),
-            _ => {
-                let a = self.addr(i);
-                self.store(a, v)
-            }
+            _ => self.store_mem(i, v),
         }
     }
 
@@ -729,7 +751,10 @@ impl<'a, 'f> Lifter<'a, 'f> {
         missing
     }
 
-    /// At a loop head: let another guest thread run if one is waiting for its turn.
+    /// At a loop head: let another guest thread run if one is waiting for its turn. Handing
+    /// the turn over neither reads nor changes this thread's `Cpu`, so nothing is stored or
+    /// loaded around it: registers and flags stay in host registers (storing them made dead
+    /// flags live in every loop, parity included, and spilled registers around the loop).
     fn poll(&mut self) {
         let ptr = self.cfg.pointer_type();
         let at = self.b.ins().symbol_value(ptr, self.refs.poll);
@@ -737,7 +762,7 @@ impl<'a, 'f> Lifter<'a, 'f> {
         let (slow, on) = (self.b.create_block(), self.b.create_block());
         self.b.ins().brif(v, slow, &[], on, &[]);
         self.b.switch_to_block(slow);
-        self.helper(self.refs.yield_, None);
+        self.b.ins().call(self.refs.yield_, &[self.cpu]);
         self.b.ins().jump(on, &[]);
         self.b.switch_to_block(on);
     }

@@ -181,6 +181,24 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
       (Cranelift's tail convention; logic per tick 3.80 -> 4.5 ms: three go on the stack, the
       results are shuffled and the caller spills around every call); an integer range check
       in the 24-bit rounding (no measurable change).
+      2026-10-31, second round. Benchmark now in a copy of the game folder without saves
+      (`.superpowers/bench_game`, git-ignored, the CD image hard-linked; its saves deleted
+      before every run, a cold start fills a slot each time; 7 full slots break the script):
+      cold start, then `t50:`..`t1300:close` walking and turning; window 6-50 s after the
+      mission's first tick. Baseline (3 runs): 186-195 fps, guest time per picture without a
+      tick 3.19-3.37 ms, imports 1.05 ms (~8500 a picture in a mission, ~0.16 us each, mostly
+      DrawIndexedPrimitive), logic per tick 3.74-3.89 ms. Done:
+      - the poll at loop heads no longer stores and reloads the state (handing the turn over
+        does not touch `Cpu`); storing it kept dead flags (parity by popcnt) alive in every loop;
+      - `[reg+disp]` memory operands are one host access `disp(mem, reg)` (`lift::mem_at`), not
+        a 32-bit add first; with an index the 32-bit address stays (wraps on purpose).
+      Result (3 runs): 196-199 fps, guest time 3.07-3.10 ms, logic per tick 3.67-3.86 ms.
+      Measured and left: the 24-bit rounding check is ~4 % (without it 3.22 ms against
+      3.19-3.37); calls: ~20 million guest calls a second in a mission (~105k a picture),
+      getters like 0x535580 on top. Next candidate: x87 values in Cranelift variables with the
+      depth known when lifting, but storing only the slots the function itself pushed around
+      calls (the first try stored all eight), with each function's net stack effect from
+      discovery; the x87 stack through memory puts store-forwarding on every FP dependency.
       Found on the way: a device loss in a mission (TestCooperativeLevel lost, not scripted)
       was followed by a null read in 0x47a6b0 (from 0x47a07a): to be looked at.
 - [ ] Frame rate: even frame times (docs/superpowers/plans/2026-10-30-tick-decoupling.md,

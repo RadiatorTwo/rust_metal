@@ -90,33 +90,27 @@ impl Lifter<'_, '_> {
     // ---- memory operands -------------------------------------------------------------------
     /// The memory operand as a double (float or integer, by its size).
     fn fmem(&mut self, i: &Instruction) -> Value {
-        let a = self.addr(i);
         match i.memory_size() {
             MemorySize::Float32 => {
-                let v = self.load_t(a, F32);
+                let v = self.load_mem(i, F32);
                 self.b.ins().fpromote(F64, v)
             }
-            MemorySize::Float64 => self.load_t(a, F64),
+            MemorySize::Float64 => self.load_mem(i, F64),
             MemorySize::Int16 => {
-                let v = self.load(a, 2);
+                let v = self.load_mem(i, I16);
                 let v = self.b.ins().sextend(I32, v);
                 self.b.ins().fcvt_from_sint(F64, v)
             }
             MemorySize::Int32 => {
-                let v = self.load(a, 4);
+                let v = self.load_mem(i, I32);
                 self.b.ins().fcvt_from_sint(F64, v)
             }
             MemorySize::Int64 => {
-                let v = self.load(a, 8);
+                let v = self.load_mem(i, I64);
                 self.b.ins().fcvt_from_sint(F64, v)
             }
             s => panic!("x87 memory operand {s:?}"),
         }
-    }
-
-    fn load_t(&mut self, a: Value, t: cranelift_codegen::ir::Type) -> Value {
-        let p = self.host(a);
-        self.b.ins().load(t, mf(), p, 0)
     }
 
     /// Run `rt_x87` on the synced state.
@@ -180,7 +174,7 @@ impl Lifter<'_, '_> {
             FpuOp::Round => self.b.ins().fdemote(F32, x),
         };
         let fast = if matches!(op, FpuOp::Round) { self.b.ins().fpromote(F64, fast) } else { fast };
-        let cw = self.b.ins().load(I16, mf(), self.cpu, offset_of!(Cpu, fcw) as i32);
+        let cw =self.b.ins().load(I16, mf(), self.cpu, offset_of!(Cpu, fcw) as i32);
         let cw = self.b.ins().uextend(I32, cw);
         // rounding control 00 (to nearest) and precision control 1x (53 or 64 bits)
         let mode = self.b.ins().band_imm_u(cw, 0xe00);
@@ -302,8 +296,7 @@ impl Lifter<'_, '_> {
                     self.fpush(v);
                     if i.memory_size() == MemorySize::Int64 {
                         // remember the integer: fistp qword of this double gives it back
-                        let a = self.addr(i);
-                        let x = self.load(a, 8);
+                        let x = self.load_mem(i, I64);
                         let p = self.slot(0);
                         self.b.ins().store(mf(), x, p, offset_of!(Cpu, st_int) as i32);
                         let bits = self.b.ins().load(I64, mf(), p, offset_of!(Cpu, st) as i32);
@@ -322,7 +315,6 @@ impl Lifter<'_, '_> {
                     self.x87_helper(X87::StoreF80, Some(a));
                 } else if mem0 {
                     let v = self.st(0);
-                    let a = self.addr(i);
                     let v = if i.memory_size() == MemorySize::Float32 {
                         // rounded to a float as the control word says
                         let v = self.arith(FpuOp::Round, v, v);
@@ -330,7 +322,7 @@ impl Lifter<'_, '_> {
                     } else {
                         v
                     };
-                    self.store(a, v);
+                    self.store_mem(i, v);
                 } else {
                     let k = sti(0);
                     if k != 0 {
@@ -354,8 +346,7 @@ impl Lifter<'_, '_> {
                     let same = self.b.ins().icmp(IntCC::Equal, bits, of);
                     x = self.b.ins().select(same, exact, x);
                 }
-                let a = self.addr(i);
-                self.store(a, x);
+                self.store_mem(i, x);
                 if m != Fist {
                     self.fpop();
                 }
