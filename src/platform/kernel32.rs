@@ -201,6 +201,7 @@ fn get_environment_strings(_: &mut Cpu) -> u32 {
 
 fn exit_process(c: &mut Cpu) -> u32 {
     let code = arg(c, 0);
+    super::d3d9::queue::flush();
     super::advapi32::save();
     log!("ExitProcess({code})");
     super::frames::finish();
@@ -1634,6 +1635,7 @@ pub const IMPORTS: &[Import] = &[
 
 fn exit_process_from_terminate(c: &mut Cpu) -> u32 {
     let code = arg(c, 1);
+    super::d3d9::queue::flush();
     super::advapi32::save();
     log!("TerminateProcess({code})");
     super::frames::finish();

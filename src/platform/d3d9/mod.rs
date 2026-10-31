@@ -366,6 +366,7 @@ fn create_device(c: &mut Cpu) -> u32 {
     c.fcw = fpu_after_create_device(c.fcw, flags);
     DEVICE.store(dev as usize, std::sync::atomic::Ordering::Relaxed);
     m.wr32(out, com::wrap(device::METHODS, dev));
+    queue::start();
     0
 }
 

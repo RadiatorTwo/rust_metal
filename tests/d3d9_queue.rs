@@ -77,3 +77,29 @@ fn two_threads_record_in_order() {
         assert_eq!(mine, (0..500).collect::<Vec<_>>());
     }
 }
+
+#[test]
+fn queued_names() {
+    use rust_metal::platform::d3d9::queue::queued_method;
+    assert!(queued_method("IDirect3DDevice9::DrawIndexedPrimitive"));
+    assert!(queued_method("IDirect3DIndexBuffer9::Unlock"));
+    assert!(!queued_method("IDirect3DDevice9::CreateTexture"));
+    assert!(!queued_method("IDirect3DDevice9::GetTransform"));
+    assert!(!queued_method("IDirect3DTexture9::LockRect"));
+}
+
+/// The order a Release keeps: flush, then the host's Release; a recorded use of the object is
+/// made before.
+#[test]
+fn release_waits_for_recorded_use() {
+    let q = Queue::new();
+    let used = Arc::new(AtomicBool::new(false));
+    let u = used.clone();
+    q.record(Box::new(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        u.store(true, Ordering::SeqCst);
+    }));
+    q.flush();
+    // the host's Release would run here
+    assert!(used.load(Ordering::SeqCst));
+}

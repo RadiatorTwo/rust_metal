@@ -269,6 +269,10 @@ struct Thunk {
     f: Option<ImpFn>,
     /// not implemented: returns 0, and its first call is logged
     stub: bool,
+    /// a Direct3D method that is recorded for the worker thread (`d3d9::queue`): it keeps the turn
+    queued: bool,
+    /// another Direct3D method: waits for the worker first
+    d3d: bool,
 }
 
 static THUNKS: Mutex<Vec<Thunk>> = Mutex::new(Vec::new());
@@ -286,7 +290,8 @@ pub fn thunk_index(a: u32) -> Option<usize> {
 fn thunk_add(name: String, nargs: i32, f: Option<ImpFn>) -> u32 {
     let mut t = lock(&THUNKS);
     assert!((t.len() as u32) < THUNK_N, "out of thunks");
-    t.push(Thunk { name, nargs, stub: false, f });
+    let (queued, d3d) = (d3d9::queue::queued_method(&name), name.starts_with("IDirect3D"));
+    t.push(Thunk { name, nargs, stub: false, f, queued, d3d });
     THUNK_LO + 4 * (t.len() as u32 - 1)
 }
 
@@ -483,7 +488,7 @@ fn on_event(c: &mut Cpu, e: Event) {
     match e {
         Event::Foreign(a) if (THUNK_LO..THUNK_LO + 4 * THUNK_N).contains(&a) => {
             let k = ((a - THUNK_LO) / 4) as usize;
-            let (f, nargs, method) = {
+            let (f, nargs, method, queued, d3d) = {
                 let t = lock(&THUNKS);
                 let Some(th) = t.get(k) else { fatal(c, &format!("call to unused thunk {a:#x}")) };
                 if trace_api() {
@@ -498,7 +503,7 @@ fn on_event(c: &mut Cpu, e: Event) {
                                 log!("warn: {} is not implemented (returns 0)", th.name);
                             }
                         }
-                        (f, th.nargs, th.name.contains("::"))
+                        (f, th.nargs, th.name.contains("::"), th.queued, th.d3d)
                     }
                     None => fatal(c, &format!("import {} is not implemented yet", th.name)),
                 }
@@ -509,7 +514,14 @@ fn on_event(c: &mut Cpu, e: Event) {
                 frames::import(k, fps::in_tick());
             }
             let t0 = (prof() || frames::on()).then(std::time::Instant::now);
-            turn_give();
+            // recorded Direct3D calls are short: they keep the turn (`d3d9::queue`)
+            let keep = queued && d3d9::queue::global().is_some();
+            if !keep {
+                turn_give();
+            }
+            if d3d && !queued {
+                d3d9::queue::flush();
+            }
             sample::IN_IMPORT.store(k + 1, Ordering::Relaxed);
             let r = f(c);
             if method && trace_api() {
@@ -523,7 +535,9 @@ fn on_event(c: &mut Cpu, e: Event) {
                     frames::import_done(k, t1 - t0);
                 }
             }
-            turn_take();
+            if !keep {
+                turn_take();
+            }
             if let (Some(t0), Some(t1)) = (t0.filter(|_| prof()), t1) {
                 prof_add(k, t1 - t0, t1.elapsed());
             }

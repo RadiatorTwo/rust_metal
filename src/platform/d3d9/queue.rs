@@ -183,3 +183,21 @@ pub fn flush() {
         q.flush();
     }
 }
+
+/// The Direct3D methods that are recorded (or answered without the host, when they can be)
+/// and so keep the turn: the game's thread does not hand over to other guest threads for them.
+pub fn queued_method(name: &str) -> bool {
+    const DEVICE: &[&str] = &[
+        "SetRenderState", "SetTextureStageState", "SetSamplerState", "SetTransform", "SetTexture", "SetStreamSource", "SetIndices", "SetFVF",
+        "SetVertexDeclaration", "SetVertexShader", "SetPixelShader", "SetVertexShaderConstantF", "SetVertexShaderConstantI", "SetVertexShaderConstantB",
+        "SetPixelShaderConstantF", "SetPixelShaderConstantI", "SetPixelShaderConstantB", "SetViewport", "SetMaterial", "SetLight", "LightEnable",
+        "SetScissorRect", "SetClipPlane", "Clear", "BeginScene", "EndScene", "DrawPrimitive", "DrawIndexedPrimitive", "DrawPrimitiveUP",
+        "DrawIndexedPrimitiveUP", "Present", "TestCooperativeLevel", "GetRenderState", "GetTextureStageState", "GetSamplerState",
+    ];
+    match name.split_once("::") {
+        Some(("IDirect3DDevice9", m)) => DEVICE.contains(&m),
+        Some(("IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9", m)) => matches!(m, "Lock" | "Unlock"),
+        Some(("IDirect3DQuery9", m)) => m == "Issue",
+        _ => false,
+    }
+}
