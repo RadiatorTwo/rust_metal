@@ -129,8 +129,10 @@ ids through containers already deleted; such a removal is skipped. `GUNMETAL_TRA
 logs the deletions), `frames.rs` (`GUNMETAL_FRAMES=<file>`: a
 line per picture, 2 s summaries, findings for the tick on a second thread at the exit), `hud.rs`
 (the HUD laid out for a screen 768 pixels high and scaled up: as big as at 1024x768), `fps.rs` (the
-frame rate: missions are uncapped with 40 ms logic ticks; the camera, model nodes, particles and
-trails are drawn interpolated between the last two ticks, registry `Smooth` = 0 turns it off;
+frame rate: missions are uncapped with 40 ms logic ticks; the camera, model nodes, particles,
+trails, the zoom (the projection's fov), target markers and the crosshair's aim point are drawn
+interpolated (the crosshair's per-frame half step made one of time) between the last two ticks (by the host's clock when
+the frame draws), registry `Smooth` = 0 turns it off;
 `GUNMETAL_STEPS=1` logs where the step is asked outside ticks). MessageBoxA is the host's, over our
 window (scripted runs, `GUNMETAL_INPUT`, answer it at once with its first button). Imports without
 an implementation stop the run with "import X is not implemented yet" when called (listed at start:

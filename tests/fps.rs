@@ -65,3 +65,30 @@ fn places_at_one_address_follow_the_nearest() {
     // nothing at the tick before
     assert_eq!(partner(&[], &cur, &at(1.0)), None);
 }
+
+/// The drawing clock's offset to the game's: the smallest seen, started again when the game's
+/// clock lost time (a pause).
+#[test]
+fn clock_offset_keeps_the_smallest() {
+    use rust_metal::platform::fps::clock_offset;
+    let mut k = clock_offset(None, 28201.6);
+    for seen in [28197.9, 28202.2, 28197.3, 28201.5, 28197.1, 28197.4] {
+        k = clock_offset(Some(k), seen);
+    }
+    assert_eq!(k, 28197.1);
+    // a slow frame does not move it
+    assert_eq!(clock_offset(Some(k), 28228.2), 28197.1);
+    // a pause of a second: start again from what is seen
+    assert_eq!(clock_offset(Some(k), 29203.0), 29203.0);
+}
+
+/// The crosshair's step is one of time: half way in `CROSSHAIR_HALF` ms, whatever the frame rate.
+#[test]
+fn crosshair_share_is_by_time() {
+    use rust_metal::platform::fps::{CROSSHAIR_HALF, crosshair_share};
+    assert!((crosshair_share(CROSSHAIR_HALF) - 0.5).abs() < 1e-6);
+    // two frames of half the time come as far as one of the whole
+    let s = crosshair_share(CROSSHAIR_HALF / 2.0);
+    assert!((1.0 - (1.0 - s) * (1.0 - s) - 0.5).abs() < 1e-6);
+    assert_eq!(crosshair_share(0.0), 0.0);
+}

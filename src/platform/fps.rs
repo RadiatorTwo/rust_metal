@@ -6,7 +6,14 @@
 //! interpolates nothing: between two ticks every picture is the same.
 //!
 //! Smooth pictures: what is drawn is put between its places at the last two ticks, by how far
-//! the real clock is past the last tick (so pictures show the game up to one tick late). The
+//! the real clock is past the last tick (so pictures show the game up to one tick late). How far
+//! is measured when the frame draws, not when the game read its clock at the frame's start: a
+//! frame that runs a tick draws ~4 ms later than one that does not, and with the clock of the
+//! frame's start its pictures were that much behind (seen 2026-10-31: the camera's movement per
+//! picture went up and down 25 times a second, a visible judder in turns and while
+//! transforming). The game's clock (proj_data+0x360) is the host's minus a constant (seen:
+//! constant over a whole mission to the ms), so the drawing time is the host's high resolution
+//! clock minus that offset (`Clock`), fixed for the frame at its first drawing call. The
 //! logic is not touched: each value is changed only for the call that draws with it and put
 //! back right after; the camera's globals are set again with the real values when the frame
 //! ends. Interpolated so far:
@@ -18,7 +25,20 @@
 //!   set_world (0x490610), which builds the WORLD matrix: ~470 calls a frame in a mission;
 //! - particles: the game keeps each emitter's place at the last two ticks and blends them by a
 //!   `t` it always passes as 0 (effects_draw 0x5123a0): we pass how far between the ticks;
-//! - trails (trail_draw 0x53a2c0): histories of points that move on by one at each tick.
+//! - trails (trail_draw 0x53a2c0): histories of points that move on by one at each tick;
+//! - the zoom: camera_apply then sets the projection (0x549cb0, cdecl(near, far, aspect * fov,
+//!   fov), fov the camera's +0xc0), which changes at each tick while the camera zooms
+//!   (transforming with Q): the fov is put between its ticks;
+//! - target markers: 0x446dc0 projects two points of a target (at the tick) with
+//!   world_to_screen (0x5492a0, cdecl(point, out)) every frame; with the camera between ticks
+//!   and the points at the tick they jumped at each tick. Both points are put between their
+//!   ticks too (by the return address of the call);
+//! - the crosshair: its target (the HUD's +0xd10, on the screen) is the player's aim point at
+//!   the tick projected every frame (0x43f160): the point is put between its ticks as the
+//!   markers' are. crosshair_draw (0x43ffd0, thiscall(target, ..), called by 0x4409d0) moves
+//!   the drawn place (+0xd34) half way to the target each time it draws, that is per frame: at
+//!   140 fps it arrived in two frames and stood still until the next tick, steps 25 times a
+//!   second (seen 2026-10-31). The step is made one of time: half way per `CROSSHAIR_HALF` ms.
 //!
 //! Still at the tick: water (0x530da0, "Water", its waves if they move), the radar's dots
 //! (0x444035, 0x4440e6). Target markers are projected every frame with the drawn camera, onto
@@ -53,6 +73,17 @@ pub const CAM_SET: u32 = 0x5491e0;
 pub const SET_WORLD: u32 = 0x490610;
 pub const EFFECTS_DRAW: u32 = 0x5123a0;
 pub const TRAIL_DRAW: u32 = 0x53a2c0;
+pub const WORLD_TO_SCREEN: u32 = 0x5492a0;
+pub const PROJECTION: u32 = 0x549cb0;
+/// camera_apply's (0x40c2b0) call of the projection (its return address).
+const CAMERA_PROJECTION: u32 = 0x40c35b;
+/// Calls of world_to_screen (their return addresses) whose point is put between its ticks:
+/// the target markers' two (0x446dc0) and the crosshair's target (0x43f160, the player's aim
+/// point [[player+0x174]+0x3738]+0x10 to the HUD's +0xd10).
+const SMOOTH_POINTS: [u32; 3] = [0x447001, 0x447010, 0x43f409];
+pub const CROSSHAIR_DRAW: u32 = 0x43ffd0;
+/// The crosshair moves half way to its target in this time (ms): the original's step at 60 fps.
+pub const CROSSHAIR_HALF: f64 = 1000.0 / 60.0;
 /// A pointer to the project's data: real clock +0x360, variableUpdate +0x4c4,
 /// variableUpdateTime +0x4c8, game time +0x4dc.
 pub const PROJ_DATA: u32 = 0x72a458;
@@ -124,6 +155,29 @@ struct State {
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
 
+/// The drawing's clock.
+struct Clock {
+    /// the host's clock (ms) minus the game's real clock: the smallest seen
+    offset: Option<f64>,
+    /// the frame and game time `alpha` was fixed for, and it
+    fixed: Option<(u32, u32, f32)>,
+}
+
+static CLOCK: Mutex<Clock> = Mutex::new(Clock { offset: None, fixed: None });
+
+/// More than this (ms) above the offset: the game's clock lost time (a pause), start again.
+const OFFSET_RESET: f64 = 100.0;
+
+/// The offset of the host's clock to the game's, given the last one and the one seen now
+/// (`host - game`, at least the true offset: the game read its clock before). The smallest seen
+/// is the true one up to the read's delay; one far larger means the game's clock lost time.
+pub fn clock_offset(last: Option<f64>, seen: f64) -> f64 {
+    match last {
+        Some(k) if seen >= k && seen - k <= OFFSET_RESET => k,
+        _ => seen,
+    }
+}
+
 fn finding() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(|| std::env::var_os("GUNMETAL_STEPS").is_some())
@@ -187,8 +241,21 @@ fn alpha() -> Option<f32> {
     if m.rd32(p + 0x4c4) == 0 || step <= 0 {
         return None;
     }
-    let ahead = m.rd32(p + 0x360).wrapping_sub(m.rd32(p + 0x4dc)) as i32;
-    Some((ahead as f32 / step as f32).clamp(0.0, 1.0))
+    let (real, game) = (m.rd32(p + 0x360), m.rd32(p + 0x4dc));
+    let frame = FRAMES.load(Ordering::Relaxed);
+    let mut clock = CLOCK.lock().unwrap();
+    if let Some((f, g, a)) = clock.fixed {
+        if f == frame && g == game {
+            return Some(a);
+        }
+    }
+    let host = super::kernel32::start_time().elapsed().as_secs_f64() * 1000.0;
+    let offset = clock_offset(clock.offset, host - real as f64);
+    clock.offset = Some(offset);
+    let ahead = host - offset - game as f64;
+    let a = (ahead / step as f64).clamp(0.0, 1.0) as f32;
+    clock.fixed = Some((frame, game, a));
+    Some(a)
 }
 
 /// The place to draw for the value `now` at `key` (its address), or None: draw it as it is.
@@ -412,6 +479,81 @@ pub fn trail_draw(c: &mut Cpu) {
     }
 }
 
+/// The projection (near, far, aspect * fov, fov): camera_apply's fov between its ticks.
+pub fn projection(c: &mut Cpu) {
+    let m = mem();
+    let e = c.r[ESP];
+    let Some(a) = alpha().filter(|_| m.rd32(e) == CAMERA_PROJECTION) else {
+        return call_original(c, PROJECTION);
+    };
+    let (wide, fov) = (f32::from_bits(m.rd32(e + 12)), f32::from_bits(m.rd32(e + 16)));
+    let mut now = [0.0; PLACE_N];
+    now[ROT] = fov;
+    let shown = place(CAMERA_PROJECTION, &now, ROT + 3, a).map_or(fov, |p| p[ROT]);
+    if shown == fov || fov == 0.0 {
+        return call_original(c, PROJECTION);
+    }
+    m.wr32(e + 12, (wide * shown / fov).to_bits());
+    m.wr32(e + 16, shown.to_bits());
+    call_original(c, PROJECTION);
+}
+
+/// The share of the way to its target that the crosshair moves in `dt` ms.
+pub fn crosshair_share(dt: f64) -> f32 {
+    (1.0 - 0.5f64.powf(dt.max(0.0) / CROSSHAIR_HALF)) as f32
+}
+
+/// When each crosshair_draw call (this, return address) last drew (host ms).
+static CROSSHAIR_LAST: Mutex<Option<HashMap<(u32, u32), f64>>> = Mutex::new(None);
+
+/// crosshair_draw(target, ..): `place += (target - place) * 0.5`, then drawn. `place` is set
+/// before so that the game's half step is the share of the time since the last draw:
+/// place' = place + (target - place) * share, so place before = 2 * place' - target.
+pub fn crosshair_draw(c: &mut Cpu) {
+    if alpha().is_none() {
+        return call_original(c, CROSSHAIR_DRAW);
+    };
+    let m = mem();
+    let (this, ret, at) = (c.r[ECX], m.rd32(c.r[ESP]), m.rd32(c.r[ESP] + 4));
+    let host = super::kernel32::start_time().elapsed().as_secs_f64() * 1000.0;
+    let dt = {
+        let mut g = CROSSHAIR_LAST.lock().unwrap();
+        let last = g.get_or_insert_with(HashMap::new).insert((this, ret), host);
+        last.map_or(CROSSHAIR_HALF, |t| (host - t).min(1000.0))
+    };
+    let mut target = [0.0f32; 3];
+    read(at, &mut target);
+    let share = crosshair_share(dt);
+    let cur = this + 0xd34;
+    let mut place_now = [0.0f32; 3];
+    read(cur, &mut place_now);
+    let before: [f32; 3] = std::array::from_fn(|i| {
+        let t = target[i];
+        let next = place_now[i] + (t - place_now[i]) * share;
+        2.0 * next - t
+    });
+    write(cur, &before);
+    call_original(c, CROSSHAIR_DRAW);
+}
+
+/// world_to_screen(point, out): the crosshair's points between their ticks.
+pub fn world_to_screen(c: &mut Cpu) {
+    let m = mem();
+    let (ret, at) = (m.rd32(c.r[ESP]), m.rd32(c.r[ESP] + 4));
+    let Some(a) = alpha().filter(|_| SMOOTH_POINTS.contains(&ret)) else {
+        return call_original(c, WORLD_TO_SCREEN);
+    };
+    let mut now = [0.0; PLACE_N];
+    read(at, &mut now[ROT..ROT + 3]);
+    // known by the call, not by the point's address (on the stack)
+    let Some(shown) = place(ret, &now, ROT + 3, a) else {
+        return call_original(c, WORLD_TO_SCREEN);
+    };
+    write(at, &shown[ROT..ROT + 3]);
+    call_original(c, WORLD_TO_SCREEN);
+    write(at, &now[ROT..ROT + 3]);
+}
+
 pub fn game_step_ms(c: &mut Cpu) {
     if finding() && IN_TICK.load(Ordering::Relaxed) == 0 {
         let ret = mem().rd32(c.r[ESP]);
@@ -448,7 +590,7 @@ macro_rules! tick_parts {
     ($($i:literal),*) => { [$((TICK_PARTS[$i], (|c: &mut Cpu| tick_part(c, $i)) as crate::rt::Hook)),*] };
 }
 
-pub const HOOKS: [(u32, crate::rt::Hook); 13] = {
+pub const HOOKS: [(u32, crate::rt::Hook); 16] = {
     let t = tick_parts!(0, 1, 2, 3, 4, 5, 6);
-    [(GAME_FRAME, game_frame), (GAME_STEP_MS, game_step_ms), (CAM_SET, cam_set), (SET_WORLD, set_world), t[0], t[1], t[2], t[3], t[4], t[5], t[6], (EFFECTS_DRAW, effects_draw), (TRAIL_DRAW, trail_draw)]
+    [(GAME_FRAME, game_frame), (GAME_STEP_MS, game_step_ms), (CAM_SET, cam_set), (SET_WORLD, set_world), t[0], t[1], t[2], t[3], t[4], t[5], t[6], (EFFECTS_DRAW, effects_draw), (TRAIL_DRAW, trail_draw), (WORLD_TO_SCREEN, world_to_screen), (PROJECTION, projection), (CROSSHAIR_DRAW, crosshair_draw)]
 };

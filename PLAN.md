@@ -253,6 +253,23 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
       count, which changes with what is in view; now by mutual nearest place (`fps::partner`).
       Confirmed gone by the user with the recording `rhinos.txt` (`GUNMETAL_INPUT=@rhinos.txt`,
       loads a saved game)
+- [x] Smooth pictures juddered (2026-10-31, seen by the user: the camera while transforming
+      with Q, the mouse crosshair; recording `ruckeln.txt`): a frame that runs a tick draws
+      ~4 ms later than one that does not, but how far between the ticks was taken from the
+      game's clock read at the frame's start, so the camera's movement per picture went up and
+      down 25 times a second (tick frames 0.64 of the others' speed, now 1.02). Now the host's
+      clock when the frame draws, minus the constant offset to the game's (`fps::Clock`). The
+      target markers (0x446dc0) projected their points at the tick with the camera between
+      ticks: put between their ticks too (world_to_screen 0x5492a0 by its call). The crosshair
+      (still juddering, seen by the user, also without moving the mouse while falling): its
+      target is the player's aim point at the tick projected each frame (0x43f160), and
+      crosshair_draw (0x43ffd0) moved it half way to the target per frame, so at 140 fps it
+      arrived in two frames and stood still until the next tick. Now the aim point is put
+      between its ticks and the half step is one of time (1/60 s, `fps::crosshair_share`).
+      Confirmed smooth by the user. The zoom while transforming is the projection's fov (camera_apply's call of
+      0x549cb0, 20.25 to 40 in steps per tick, recording `zoom.txt`): put between its ticks too.
+      Confirmed much better by the user. Left: in that scene a frame with a tick takes ~15 ms,
+      the others ~9-10 ms (~85 fps): the pictures are right but come unevenly (frame rate work)
 - [ ] Smooth pictures, left at the tick (small): water (0x530da0, its waves if they move),
       the radar's dots (0x444035, 0x4440e6), a trail's texture scroll (+0x98); look at it
       in play (does anything still shake?)
