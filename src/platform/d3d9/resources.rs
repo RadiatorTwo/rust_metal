@@ -62,6 +62,8 @@ struct Locked {
 struct Level {
     open: Vec<Locked>,
     kept: Option<Vec<(u64, u64)>>,
+    /// something other than our Unlock wrote the host's buffer once (`stale`)
+    stale: bool,
 }
 
 /// Lock state by (guest object, level).
@@ -88,7 +90,8 @@ fn begin(this: u32, level: u32, guest: u32, host: *mut c_void, size: usize, flag
         l.kept = Some(Vec::new());
     }
     let (lo, hi) = (guest as u64, guest as u64 + size as u64);
-    if lock_copy_in(flags) {
+    // a lock the host has not seen (null): nothing to copy from
+    if lock_copy_in(flags) && !host.is_null() {
         let open = l.open.iter().map(|l| (l.guest as u64, l.guest as u64 + l.size as u64));
         let mut covered: Vec<(u64, u64)> = open.chain(l.kept.iter().flatten().copied()).filter(|&(a, b)| a < hi && b > lo).collect();
         covered.sort_unstable();
@@ -152,9 +155,16 @@ pub fn lock_needs_host(kept: &[(u64, u64)], lo: u64, hi: u64, flags: u32) -> boo
     at < hi
 }
 
-/// The kept guest ranges of a buffer (`lock_needs_host`).
-fn kept_ranges(this: u32) -> Vec<(u64, u64)> {
-    lock(&LOCKS).as_ref().and_then(|m| m.get(&(this, 0))).and_then(|l| l.kept.clone()).unwrap_or_default()
+/// Whether a buffer's lock of [lo, hi) with `flags` must lock the host's buffer. Only our
+/// Unlock writes a buffer, so bytes its guest copy never held were never written: their
+/// contents are undefined, and the guest copy's are as good. Not so once something else wrote
+/// it (`stale`): then `lock_needs_host` decides by the kept ranges.
+fn buffer_needs_host(this: u32, lo: u64, hi: u64, flags: u32) -> bool {
+    let locks = lock(&LOCKS);
+    match locks.as_ref().and_then(|m| m.get(&(this, 0))) {
+        Some(l) if l.stale => lock_needs_host(l.kept.as_deref().unwrap_or(&[]), lo, hi, flags),
+        _ => false,
+    }
 }
 
 /// The latest open lock of (`this`, `level`): (host pointer, 0 for a lock the host has not
@@ -170,6 +180,7 @@ pub fn stale(this: u32) {
             if let Some(k) = l.kept.as_mut() {
                 k.clear();
             }
+            l.stale = true;
         }
     }
 }
@@ -746,7 +757,7 @@ fn buffer_lock(c: &mut Cpu) -> u32 {
     }
     // with the D3D9 worker: the guest copy answers, the host's buffer is written at the Unlock
     let (lo, hi) = (offset as u64, offset as u64 + size as u64);
-    if super::queue::global().is_some() && !lock_needs_host(&kept_ranges(this), lo, hi, flags) {
+    if super::queue::global().is_some() && !buffer_needs_host(this, lo, hi, flags) {
         let guest = com::shadow(this, 0, total) + offset;
         begin_kept_lock(this, 0, guest, std::ptr::null_mut(), size as usize, flags);
         mem().wr32(out, guest);
@@ -855,10 +866,16 @@ fn query_get_data_size(c: &mut Cpu) -> u32 {
 }
 
 fn query_issue(c: &mut Cpu) -> u32 {
-    // not recorded yet: the calls recorded before go first
-    super::queue::flush();
     let (p, v) = query(c);
-    hr(unsafe { (v.Issue)(p, arg(c, 1)) })
+    let flags = arg(c, 1);
+    if let Some(q) = super::queue::global() {
+        let (p, issue) = (p as usize, v.Issue);
+        q.record(Box::new(move || {
+            let _ = unsafe { issue(p as *mut c_void, flags) };
+        }));
+        return 0;
+    }
+    hr(unsafe { (v.Issue)(p, flags) })
 }
 
 /// GetData(data, size, flags): the query results (occlusion counts, event flags) hold no

@@ -192,7 +192,7 @@ pub fn queued_method(name: &str) -> bool {
         "SetVertexDeclaration", "SetVertexShader", "SetPixelShader", "SetVertexShaderConstantF", "SetVertexShaderConstantI", "SetVertexShaderConstantB",
         "SetPixelShaderConstantF", "SetPixelShaderConstantI", "SetPixelShaderConstantB", "SetViewport", "SetMaterial", "SetLight", "LightEnable",
         "SetScissorRect", "SetClipPlane", "Clear", "BeginScene", "EndScene", "DrawPrimitive", "DrawIndexedPrimitive", "DrawPrimitiveUP",
-        "DrawIndexedPrimitiveUP", "Present", "TestCooperativeLevel", "GetRenderState", "GetTextureStageState", "GetSamplerState",
+        "DrawIndexedPrimitiveUP", "Present", "SetGammaRamp", "TestCooperativeLevel", "GetRenderState", "GetTextureStageState", "GetSamplerState",
     ];
     match name.split_once("::") {
         Some(("IDirect3DDevice9", m)) => DEVICE.contains(&m),

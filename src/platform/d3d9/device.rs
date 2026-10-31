@@ -175,6 +175,7 @@ fn reset(c: &mut Cpu) -> u32 {
     invalidate_states();
     if r == 0 {
         *crate::platform::lock(&SIMULATED_LOSS) = None;
+        LAST_COOP.store(0, Ordering::Relaxed);
     }
     r
 }
@@ -201,6 +202,7 @@ pub fn lost_ended() -> bool {
         }
         *asked = Some(now);
     }
+    super::queue::flush();
     let p = super::device();
     let host = hr(unsafe { (vtbl::<IDirect3DDevice9_Vtbl>(p).TestCooperativeLevel)(p) });
     let ended = cooperative_level(host, *crate::platform::lock(&SIMULATED_LOSS), now) != D3DERR_DEVICELOST;
@@ -210,6 +212,9 @@ pub fn lost_ended() -> bool {
     }
     ended
 }
+
+/// The host's TestCooperativeLevel after the worker's last Present (`queue`).
+static LAST_COOP: AtomicU32 = AtomicU32::new(0);
 
 pub const D3DERR_DEVICELOST: u32 = 0x8876_0868;
 pub const D3DERR_DEVICENOTRESET: u32 = 0x8876_0869;
@@ -241,11 +246,10 @@ pub fn cooperative_level(host: u32, until: Option<std::time::Instant>, now: std:
 /// TestCooperativeLevel, called by the game every frame (frame_begin 0x46f590). A change of
 /// its answer is logged: the device lost, ready for a Reset, or fine.
 fn test_cooperative_level(c: &mut Cpu) -> u32 {
-    // not recorded yet: the calls recorded before go first
-    super::queue::flush();
     static LAST: AtomicU32 = AtomicU32::new(0);
     let (p, v) = dv(c);
-    let host = hr(unsafe { (v.TestCooperativeLevel)(p) });
+    // with the worker: its answer after the last Present it made
+    let host = if super::queue::global().is_some() { LAST_COOP.load(Ordering::Relaxed) } else { hr(unsafe { (v.TestCooperativeLevel)(p) }) };
     let r = cooperative_level(host, *crate::platform::lock(&SIMULATED_LOSS), std::time::Instant::now());
     SEEN_LOST.store(r == D3DERR_DEVICELOST, Ordering::Relaxed);
     if LAST.swap(r, Ordering::Relaxed) != r {
@@ -264,8 +268,9 @@ fn test_cooperative_level(c: &mut Cpu) -> u32 {
 /// GUNMETAL_SHOT first when one is due. Without a rectangle of the game's, the picture keeps
 /// its aspect ratio in our window (`letterbox`).
 fn present(c: &mut Cpu) -> u32 {
-    // not recorded yet: the calls recorded before go first
-    super::queue::flush();
+    if let Some(q) = super::queue::global() {
+        return present_queued(c, q);
+    }
     let (p, v) = dv(c);
     let frames = crate::platform::frames::on();
     if frames {
@@ -305,6 +310,40 @@ fn present(c: &mut Cpu) -> u32 {
     hr(r)
 }
 
+/// Present with the worker: recorded with copies of its rectangles and region; the worker
+/// writes GUNMETAL_SHOT, presents, clears and asks TestCooperativeLevel for the game's next
+/// frame. The game's thread then waits only until the picture before this one is finished.
+fn present_queued(c: &Cpu, q: &'static super::queue::Queue) -> u32 {
+    let frames = crate::platform::frames::on();
+    if frames {
+        crate::platform::frames::before_present();
+    }
+    let (p, v) = dv(c);
+    let (src, dst, w) = (copy_in(arg(c, 1), 16), copy_in(arg(c, 2), 16), arg(c, 3));
+    // RGNDATA: a 32-byte header whose nCount (at 8) rectangles of 16 bytes follow
+    let region = (arg(c, 4) != 0).then(|| 32 + 16 * mem().rd32(arg(c, 4) + 8) as usize).and_then(|n| copy_in(arg(c, 4), n));
+    let win = if w == 0 { 0 } else { super::host_hwnd(w).0 as usize };
+    let target = if w == 0 { super::host_hwnd(crate::platform::user32::main_window()).0 as usize } else { win };
+    let (p, present_fn) = (p as usize, v.Present);
+    q.record(Box::new(move || {
+        let p = p as *mut c_void;
+        let v = unsafe { vtbl::<IDirect3DDevice9_Vtbl>(p) };
+        super::shot::before_present(p, None);
+        let dest = if dst.is_none() { super::letterbox(HWND(target as *mut c_void)) } else { None };
+        let dest_ptr = dest.as_ref().map_or(ptr(&dst), |r| r as *const _);
+        let r = unsafe { present_fn(p, ptr(&src), dest_ptr, HWND(win as *mut c_void), ptr(&region)) };
+        if r.is_ok() {
+            clear_back_buffer(p, v);
+        }
+        LAST_COOP.store(hr(unsafe { (v.TestCooperativeLevel)(p) }), Ordering::Relaxed);
+    }));
+    q.picture_done();
+    if frames {
+        crate::platform::frames::after_present();
+    }
+    0
+}
+
 /// The whole back buffer black after a Present. The game clears only depth and stencil and
 /// draws over every pixel, except where its picture is narrower than the back buffer (its 4:3
 /// menus on a wider one, `video`): the sides would keep whatever was there.
@@ -339,9 +378,27 @@ fn clear_back_buffer(p: *mut c_void, v: &IDirect3DDevice9_Vtbl) {
     }
 }
 
+/// SetGammaRamp(swap chain, flags, ramp): with the worker recorded, and a ramp the same as
+/// the last one is left out (the game sets it every frame in places; the host's call is slow).
 fn set_gamma_ramp(c: &mut Cpu) -> u32 {
     let (p, v) = dv(c);
-    unsafe { (v.SetGammaRamp)(p, arg(c, 1), arg(c, 2), cp(arg(c, 3))) };
+    let Some(q) = super::queue::global() else {
+        unsafe { (v.SetGammaRamp)(p, arg(c, 1), arg(c, 2), cp(arg(c, 3))) };
+        return 0;
+    };
+    // D3DGAMMARAMP: three arrays of 256 WORDs
+    let (sc, flags, ramp) = (arg(c, 1), arg(c, 2), copy_in(arg(c, 3), 1536));
+    static LAST: std::sync::Mutex<Option<(u32, u32, Box<[u8]>)>> = std::sync::Mutex::new(None);
+    {
+        let mut last = crate::platform::lock(&LAST);
+        let now = ramp.as_ref().map(|r| (sc, flags, r.clone()));
+        if now.is_some() && *last == now {
+            return 0;
+        }
+        *last = now;
+    }
+    let (p, f) = (p as usize, v.SetGammaRamp);
+    q.record(Box::new(move || unsafe { f(p as *mut c_void, sc, flags, ptr(&ramp)) }));
     0
 }
 
