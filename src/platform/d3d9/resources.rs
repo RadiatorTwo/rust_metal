@@ -910,6 +910,7 @@ fn sb_capture(c: &mut Cpu) -> u32 {
 }
 
 fn sb_apply(c: &mut Cpu) -> u32 {
+    super::device::invalidate_states();
     let (p, v) = sb(c);
     hr(unsafe { (v.Apply)(p) })
 }

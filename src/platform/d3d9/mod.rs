@@ -17,6 +17,7 @@ pub mod device;
 pub mod ex;
 pub mod queue;
 pub mod resources;
+pub mod state;
 pub mod shot;
 pub mod types;
 
@@ -366,6 +367,7 @@ fn create_device(c: &mut Cpu) -> u32 {
     c.fcw = fpu_after_create_device(c.fcw, flags);
     DEVICE.store(dev as usize, std::sync::atomic::Ordering::Relaxed);
     m.wr32(out, com::wrap(device::METHODS, dev));
+    device::invalidate_states();
     queue::start();
     0
 }

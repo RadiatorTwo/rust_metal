@@ -172,6 +172,7 @@ fn reset(c: &mut Cpu) -> u32 {
         if r.is_err() { r } else { super::ex::make_target(p, params) }
     }));
     log!("d3d9: Reset -> {r:#x}");
+    invalidate_states();
     if r == 0 {
         *crate::platform::lock(&SIMULATED_LOSS) = None;
     }
@@ -377,29 +378,11 @@ queued!(light_enable, LightEnable, |c| { i = arg(c, 1), on = arg(c, 2) } (i, BOO
 pass!(get_light_enable, GetLightEnable, |c| (arg(c, 1), gp(arg(c, 2))));
 queued!(set_clip_plane, SetClipPlane, |c| { i = arg(c, 1), pl = copy_in(arg(c, 2), 16) } (i, ptr(&pl)));
 pass!(get_clip_plane, GetClipPlane, |c| (arg(c, 1), gp(arg(c, 2))));
-queued!(set_render_state, SetRenderState, |c| { k = arg(c, 1), x = arg(c, 2) } (D3DRENDERSTATETYPE(k as i32), x));
-fn get_render_state(c: &mut Cpu) -> u32 {
-    // not recorded yet: the calls recorded before go first
-    super::queue::flush();
-    let (p, v) = dv(c);
-    hr(unsafe { (v.GetRenderState)(p, D3DRENDERSTATETYPE(arg(c, 1) as i32), gp(arg(c, 2))) })
-}
+queued!(set_render_state_host, SetRenderState, |c| { k = arg(c, 1), x = arg(c, 2) } (D3DRENDERSTATETYPE(k as i32), x));
 pass!(set_clip_status, SetClipStatus, |c| (cp(arg(c, 1))));
 pass!(get_clip_status, GetClipStatus, |c| (gp(arg(c, 1))));
-fn get_texture_stage_state(c: &mut Cpu) -> u32 {
-    // not recorded yet: the calls recorded before go first
-    super::queue::flush();
-    let (p, v) = dv(c);
-    hr(unsafe { (v.GetTextureStageState)(p, arg(c, 1), D3DTEXTURESTAGESTATETYPE(arg(c, 2) as i32), gp(arg(c, 3))) })
-}
-queued!(set_texture_stage_state, SetTextureStageState, |c| { st = arg(c, 1), k = arg(c, 2), x = arg(c, 3) } (st, D3DTEXTURESTAGESTATETYPE(k as i32), x));
-fn get_sampler_state(c: &mut Cpu) -> u32 {
-    // not recorded yet: the calls recorded before go first
-    super::queue::flush();
-    let (p, v) = dv(c);
-    hr(unsafe { (v.GetSamplerState)(p, arg(c, 1), D3DSAMPLERSTATETYPE(arg(c, 2) as i32), gp(arg(c, 3))) })
-}
-queued!(set_sampler_state, SetSamplerState, |c| { s = arg(c, 1), k = arg(c, 2), x = arg(c, 3) } (s, D3DSAMPLERSTATETYPE(k as i32), x));
+queued!(set_texture_stage_state_host, SetTextureStageState, |c| { st = arg(c, 1), k = arg(c, 2), x = arg(c, 3) } (st, D3DTEXTURESTAGESTATETYPE(k as i32), x));
+queued!(set_sampler_state_host, SetSamplerState, |c| { s = arg(c, 1), k = arg(c, 2), x = arg(c, 3) } (s, D3DSAMPLERSTATETYPE(k as i32), x));
 pass!(validate_device, ValidateDevice, |c| (gp(arg(c, 1))));
 queued!(set_scissor_rect, SetScissorRect, |c| { r = copy_in(arg(c, 1), 16) } (ptr(&r)));
 pass!(get_scissor_rect, GetScissorRect, |c| (gp(arg(c, 1))));
@@ -407,6 +390,94 @@ pass!(set_software_vertex_processing, SetSoftwareVertexProcessing, |c| (BOOL(arg
 pass!(set_npatch_mode, SetNPatchMode, |c| (f32::from_bits(arg(c, 1))));
 queued!(set_fvf, SetFVF, |c| { fvf = arg(c, 1) } (fvf));
 pass!(get_fvf, GetFVF, |c| (gp(arg(c, 1))));
+
+// ---- states, answered from `state` while the calls are recorded ----
+
+fn set_render_state(c: &mut Cpu) -> u32 {
+    with_states(|s| s.set_render(arg(c, 1), arg(c, 2)));
+    set_render_state_host(c)
+}
+
+fn set_texture_stage_state(c: &mut Cpu) -> u32 {
+    with_states(|s| s.set_stage(arg(c, 1), arg(c, 2), arg(c, 3)));
+    set_texture_stage_state_host(c)
+}
+
+fn set_sampler_state(c: &mut Cpu) -> u32 {
+    with_states(|s| s.set_sampler(arg(c, 1), arg(c, 2), arg(c, 3)));
+    set_sampler_state_host(c)
+}
+
+fn with_states<R>(f: impl FnOnce(&mut super::state::States) -> R) -> R {
+    f(crate::platform::lock(&super::state::STATES).get_or_insert_with(Default::default))
+}
+
+/// The host's states changed behind the cache (Reset, state blocks): the next Get refills it.
+pub(super) fn invalidate_states() {
+    with_states(|s| s.invalidate());
+}
+
+/// A Get*State: from the cache while the queue is on; otherwise, or when the cache does not
+/// hold it, the host's after a flush, which also fills the whole cache if it is stale.
+fn get_state(c: &Cpu, out: u32, cached: impl Fn(&super::state::States) -> Option<u32>, host: impl FnOnce(*mut c_void, &'static IDirect3DDevice9_Vtbl) -> windows::core::HRESULT) -> u32 {
+    let on = super::queue::global().is_some();
+    if on && let Some(x) = with_states(|s| cached(s)) {
+        mem().wr32(out, x);
+        return 0;
+    }
+    super::queue::flush();
+    let (p, v) = dv(c);
+    if on && !with_states(|s| s.valid()) {
+        fill_states(p, v);
+        if let Some(x) = with_states(|s| cached(s)) {
+            mem().wr32(out, x);
+            return 0;
+        }
+    }
+    hr(host(p, v))
+}
+
+/// Every render, texture stage and sampler state from the host's device into the cache.
+fn fill_states(p: *mut c_void, v: &IDirect3DDevice9_Vtbl) {
+    let (render, (stages, stage_states), (samplers, sampler_states)) = super::state::States::sizes();
+    with_states(|s| unsafe {
+        for k in 0..render {
+            let mut x = 0;
+            let _ = (v.GetRenderState)(p, D3DRENDERSTATETYPE(k as i32), &mut x);
+            s.set_render(k, x);
+        }
+        for st in 0..stages {
+            for k in 0..stage_states {
+                let mut x = 0;
+                let _ = (v.GetTextureStageState)(p, st, D3DTEXTURESTAGESTATETYPE(k as i32), &mut x);
+                s.set_stage(st, k, x);
+            }
+        }
+        for sm in 0..samplers {
+            for k in 0..sampler_states {
+                let mut x = 0;
+                let _ = (v.GetSamplerState)(p, sm, D3DSAMPLERSTATETYPE(k as i32), &mut x);
+                s.set_sampler(sm, k, x);
+            }
+        }
+        s.validate();
+    });
+}
+
+fn get_render_state(c: &mut Cpu) -> u32 {
+    let (k, out) = (arg(c, 1), arg(c, 2));
+    get_state(c, out, |s| s.render(k), |p, v| unsafe { (v.GetRenderState)(p, D3DRENDERSTATETYPE(k as i32), gp(out)) })
+}
+
+fn get_texture_stage_state(c: &mut Cpu) -> u32 {
+    let (st, k, out) = (arg(c, 1), arg(c, 2), arg(c, 3));
+    get_state(c, out, |s| s.stage(st, k), |p, v| unsafe { (v.GetTextureStageState)(p, st, D3DTEXTURESTAGESTATETYPE(k as i32), gp(out)) })
+}
+
+fn get_sampler_state(c: &mut Cpu) -> u32 {
+    let (sm, k, out) = (arg(c, 1), arg(c, 2), arg(c, 3));
+    get_state(c, out, |s| s.sampler(sm, k), |p, v| unsafe { (v.GetSamplerState)(p, sm, D3DSAMPLERSTATETYPE(k as i32), gp(out)) })
+}
 
 // ---- resources (`resources`) ----
 
@@ -589,9 +660,15 @@ fn create_state_block(c: &mut Cpu) -> u32 {
     resources::created(r, b, resources::STATE_BLOCK, arg(c, 2), "CreateStateBlock")
 }
 
-pass!(begin_state_block, BeginStateBlock, |c| ());
+// while a state block records, Set* calls do not change the device: the cache is refilled after
+fn begin_state_block(c: &mut Cpu) -> u32 {
+    invalidate_states();
+    let (p, v) = dv(c);
+    hr(unsafe { (v.BeginStateBlock)(p) })
+}
 
 fn end_state_block(c: &mut Cpu) -> u32 {
+    invalidate_states();
     let (p, v) = dv(c);
     let mut b: *mut c_void = std::ptr::null_mut();
     let r = unsafe { (v.EndStateBlock)(p, &mut b) };
