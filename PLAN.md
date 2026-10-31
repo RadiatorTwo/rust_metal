@@ -172,7 +172,9 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
       flat now: the largest guest function is 4.8 %, DrawIndexedPrimitive 5.9 %, Present 4.5 %.
       - Direct3D 9Ex with the flip model (`d3d9/ex.rs`, the user's choice to do first): 157 fps
         against 139-147 (one run), imports per picture 1.17 against 1.36-1.50 ms, Present 0.18
-        against 0.23-0.32 ms on average; Present above 2 ms stays rare (6 of 8368). Seen: front
+        against 0.23-0.32 ms on average; Present above 2 ms stays rare (6 of 8368). Off by
+        default now (`GUNMETAL_D3D9EX=1`): RivaTuner's overlay vanished with it, and its swap
+        chain had the window's size at CreateDevice, still tiny then (fixed: the game's size). Seen: front
         end, mission, a simulated loss with Reset. To be confirmed by hand: Alt+Enter both
         ways, the Video menu's mode change (Reset), Alt+Tab, the picture's black bars.
       Tried and dropped too: the eight registers as arguments and results of guest functions

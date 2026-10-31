@@ -136,10 +136,10 @@ window (scripted runs, `GUNMETAL_INPUT`, answer it at once with its first button
 an implementation stop the run with "import X is not implemented yet" when called (listed at start:
 CreateProcessA, EnumSystemLocalesA, file mappings, CreateFileW).
 
-Direct3D 9 (`d3d9/`): by default a 9Ex device with the flip model (`ex.rs`; `GUNMETAL_D3D9EX=0` or a
-failed Direct3DCreate9Ex: plain D3D9 as described below): the game's back buffer is our render
+Direct3D 9 (`d3d9/`): with `GUNMETAL_D3D9EX=1` a 9Ex device with the flip model (`ex.rs`; off by default:
+RivaTuner's overlay vanished with it; plain D3D9 as described below otherwise): the game's back buffer is our render
 target (its size, format and MSAA, with our depth-stencil surface; GetBackBuffer hands it out), the
-swap chain has the window's size, 2 buffers, FLIPEX, frame latency 1; Present resolves and
+swap chain has the game's size, 2 buffers, FLIPEX, frame latency 1; Present resolves and
 StretchRects the picture into it with the aspect kept (black around it) and calls PresentEx.
 MANAGED does not exist on 9Ex: managed buffers are created in the default pool, managed textures
 and cube textures in the default pool with a system-memory twin that their locks (also through a

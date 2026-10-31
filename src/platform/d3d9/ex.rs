@@ -1,17 +1,17 @@
-//! Direct3D 9Ex with the flip model (D3DSWAPEFFECT_FLIPEX), the default: Present hands the
-//! picture to the desktop compositor without the copy and the queue of the old blit model, whose
-//! Present blocked 2-5 ms now and then (PLAN.md). Off with `GUNMETAL_D3D9EX=0`, or when
-//! Direct3DCreate9Ex fails; then everything is plain Direct3D 9 as before.
+//! Direct3D 9Ex with the flip model (D3DSWAPEFFECT_FLIPEX), with `GUNMETAL_D3D9EX=1` (off by
+//! default: RivaTuner's overlay does not show with it): Present hands the picture to the desktop
+//! compositor without the copy and the queue of the old blit model, whose Present blocked 2-5 ms
+//! now and then (PLAN.md). Without it, or when Direct3DCreate9Ex fails, everything is plain
+//! Direct3D 9.
 //!
 //! What the game asked for and the flip model does not allow is done here:
 //! - **Its back buffer** is a render target of ours (`Target`): the size, format and
 //!   multisampling the game asked for (2x MSAA), with a depth-stencil surface of ours for its
 //!   automatic one. GetBackBuffer hands it out; it is render target 0 and the depth-stencil
 //!   surface after CreateDevice and Reset. The real swap chain (2 buffers, no multisampling) has
-//!   the window's size at CreateDevice or Reset; Present resolves the picture into it with the
-//!   aspect ratio kept (black bars around it) and calls PresentEx. When the window has another
-//!   size later (Alt+Enter) the compositor scales the swap chain to it, and the bars are
-//!   computed for the window's size, so the picture still keeps its shape.
+//!   the game's size; Present resolves the picture into it with the aspect ratio kept for the
+//!   window (black bars around it) and calls PresentEx, and the compositor scales it to the
+//!   window.
 //! - **D3DPOOL_MANAGED** does not exist on a 9Ex device. A managed buffer is created in the
 //!   default pool (lockable on 9Ex). A managed texture or cube texture is created in the
 //!   default pool with a twin in system memory (`Twins`): the game's locks lock the twin, and
@@ -37,9 +37,10 @@ pub fn on() -> bool {
     ON.load(Ordering::Relaxed)
 }
 
-/// Direct3DCreate9Ex, unless `GUNMETAL_D3D9EX=0`: the IDirect3D9Ex (an IDirect3D9 to the game).
+/// Direct3DCreate9Ex with `GUNMETAL_D3D9EX=1`: the IDirect3D9Ex (an IDirect3D9 to the game).
+/// Off by default: the user saw RivaTuner's overlay vanish with it.
 pub fn create(sdk: u32) -> Option<*mut c_void> {
-    if std::env::var("GUNMETAL_D3D9EX").is_ok_and(|v| v == "0") {
+    if !std::env::var("GUNMETAL_D3D9EX").is_ok_and(|v| v == "1") {
         return None;
     }
     match unsafe { Direct3DCreate9Ex(sdk) } {
@@ -230,8 +231,14 @@ pub fn host_params(p: &mut D3DPRESENT_PARAMETERS) -> Asked {
         auto_depth: (p.EnableAutoDepthStencil.0, p.AutoDepthStencilFormat.0),
         flags: p.Flags,
     };
-    let client = client_size(p.hDeviceWindow).filter(|&(w, h)| w > 0 && h > 0);
-    let (w, h) = client.unwrap_or(asked.size);
+    // the game's size (the compositor scales it to the window, as the old Present did); the
+    // window's when the game leaves it to D3D9. Not the window's at this moment: while the game
+    // starts, its window may still be tiny, and a swap chain of that size stays blurry.
+    let (w, h) = if asked.size.0 > 0 && asked.size.1 > 0 {
+        asked.size
+    } else {
+        client_size(p.hDeviceWindow).filter(|&(w, h)| w > 0 && h > 0).unwrap_or((640, 480))
+    };
     p.BackBufferWidth = w;
     p.BackBufferHeight = h;
     p.BackBufferFormat = D3DFMT_X8R8G8B8;
