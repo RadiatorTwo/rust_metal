@@ -24,10 +24,15 @@
 //! (0x444035, 0x4440e6). Target markers are projected every frame with the drawn camera, onto
 //! a target's place at the last tick (off by at most what it moves in 40 ms).
 //!
-//! A value is known by its address and how many times it was drawn before in the same frame
-//! (one node can be drawn more than once). It is interpolated only when it was seen at the
-//! tick before the current one and still holds what it held at the current tick; rotations
-//! are slerped as quaternions. Registry value `Smooth` (DWORD, in the game's key): 0 turns it
+//! A value is known by its address and its place: one address is drawn many times a frame with
+//! different places (grass, units drawn through one node), and which of them are drawn changes
+//! with what is in view, so the n-th draw of an address is not the same thing from tick to tick
+//! (blending two of them made objects flash to another's place and back). Each address keeps
+//! the places drawn at the last two ticks; a place drawn now is blended with the place of the
+//! tick before that is nearest to it, when the two are each other's nearest (mutual nearest
+//! neighbours), the tick before is the one just before, and the step is not a jump. Places that
+//! first appear after the first frame of a tick (changed by the drawing, or newly in view) are
+//! drawn as they are. Rotations are slerped as quaternions. Registry value `Smooth` (DWORD, in the game's key): 0 turns it
 //! off (pictures as the original draws them).
 //!
 //! `GUNMETAL_STEPS=1` (a finding aid): where game_step_ms (0x534eb0) is asked outside the
@@ -68,22 +73,51 @@ static IN_FRAME: AtomicBool = AtomicBool::new(false);
 static STEPS: Mutex<BTreeMap<u32, u32>> = Mutex::new(BTreeMap::new());
 static FRAMES: AtomicU32 = AtomicU32::new(0);
 
-/// A drawn value at the last two ticks it was seen at.
-#[derive(Clone, Copy)]
+/// The places drawn at one address at the last two ticks it was drawn at.
+#[derive(Default)]
 struct Track {
-    prev: [f32; PLACE_N],
-    cur: [f32; PLACE_N],
+    /// places at the tick before (only those seen in the tick's first frame)
+    prev: Vec<[f32; PLACE_N]>,
+    /// places at this tick, and whether each was seen in the tick's first frame
+    cur: Vec<([f32; PLACE_N], bool)>,
     prev_t: u32,
     cur_t: u32,
+    /// the first frame that drew it at this tick
+    first: u32,
     /// the frame it was last drawn in
     frame: u32,
 }
 
+/// At most this many places per address and tick.
+const MAX_PLACES: usize = 4096;
+
+/// The squared distance of two places' positions.
+fn dist2(a: &[f32; PLACE_N], b: &[f32; PLACE_N]) -> f32 {
+    (ROT..ROT + 3).map(|i| (a[i] - b[i]).powi(2)).sum()
+}
+
+/// The index of the place in `set` nearest to `p` (by position), if any.
+fn nearest<'a>(p: &[f32; PLACE_N], set: impl Iterator<Item = &'a [f32; PLACE_N]>) -> Option<(usize, f32)> {
+    set.enumerate().map(|(i, q)| (i, dist2(p, q))).min_by(|a, b| a.1.total_cmp(&b.1))
+}
+
+/// The place of the tick before that `now` continues: the nearest one of `prev`, when `now` is
+/// also the nearest to it of this tick's places `cur` (those marked usable) and it did not jump.
+pub fn partner(prev: &[[f32; PLACE_N]], cur: &[([f32; PLACE_N], bool)], now: &[f32; PLACE_N]) -> Option<[f32; PLACE_N]> {
+    let (i, d) = nearest(now, prev.iter())?;
+    if !(d.sqrt() < JUMP) {
+        return None;
+    }
+    let p = &prev[i];
+    let back = dist2(p, now);
+    // another place of this tick nearer to it: that one continues it
+    let taken = cur.iter().filter(|c| c.1 && c.0 != *now).any(|c| dist2(p, &c.0) < back);
+    (!taken).then_some(*p)
+}
+
 #[derive(Default)]
 struct State {
-    tracks: HashMap<(u32, u32), Track>,
-    /// draws of each address in this frame
-    seen: HashMap<u32, u32>,
+    tracks: HashMap<u32, Track>,
     /// the camera's last cam_set in this frame (position, rotation), if it was changed
     camera: Option<(u32, u32)>,
 }
@@ -106,7 +140,6 @@ fn smooth() -> bool {
 
 pub fn game_frame(c: &mut Cpu) {
     if let Some(s) = STATE.lock().unwrap().as_mut() {
-        s.seen.clear();
         s.camera = None;
     }
     let log = frames::on();
@@ -166,30 +199,36 @@ fn place(key: u32, now: &[f32; PLACE_N], n: usize, alpha: f32) -> Option<[f32; P
     let frame = FRAMES.load(Ordering::Relaxed);
     let mut guard = STATE.lock().unwrap();
     let s = guard.get_or_insert_with(State::default);
-    let k = s.seen.entry(key).or_insert(0);
-    let occurrence = *k;
-    *k += 1;
-    let tr = s.tracks.entry((key, occurrence)).or_insert(Track { prev: *now, cur: *now, prev_t: t, cur_t: t, frame });
-    tr.frame = frame;
+    let tr = s.tracks.entry(key).or_insert_with(|| Track { prev_t: t.wrapping_sub(1), cur_t: t.wrapping_sub(1), ..Default::default() });
     if tr.cur_t != t {
-        tr.prev = tr.cur;
+        // a new tick: this tick's places become the tick before's
+        tr.prev = tr.cur.drain(..).filter(|c| c.1).map(|c| c.0).collect();
         tr.prev_t = tr.cur_t;
         tr.cur_t = t;
-        tr.cur = *now;
-    } else if tr.cur[..n] != now[..n] {
-        // changed since the tick (not ours to smooth)
-        tr.cur = *now;
-        tr.prev = *now;
+        tr.first = frame;
+    }
+    tr.frame = frame;
+    // compared on the floats this call uses
+    let mut now_n = [0.0; PLACE_N];
+    now_n[..n].copy_from_slice(&now[..n]);
+    let first_frame = tr.first == frame;
+    let known = tr.cur.iter().position(|c| c.0 == now_n);
+    let usable = match known {
+        Some(k) => tr.cur[k].1,
+        None => {
+            if tr.cur.len() < MAX_PLACES {
+                tr.cur.push((now_n, first_frame));
+            }
+            first_frame
+        }
+    };
+    if !usable || tr.prev_t.wrapping_add(step) != tr.cur_t {
         return None;
     }
-    if tr.prev_t.wrapping_add(step) != tr.cur_t {
-        return None;
-    }
-    let d: f32 = (ROT..ROT + 3).map(|i| (tr.cur[i] - tr.prev[i]).powi(2)).sum::<f32>().sqrt();
-    if !(d < JUMP) {
-        return None;
-    }
-    Some(blend(&tr.prev, &tr.cur, n, alpha))
+    let prev = partner(&tr.prev, &tr.cur, &now_n)?;
+    let mut prev_full = *now;
+    prev_full[..n].copy_from_slice(&prev[..n]);
+    Some(blend(&prev_full, now, n, alpha))
 }
 
 /// prev + (cur - prev) * a; the rotation slerped when both are rotations.

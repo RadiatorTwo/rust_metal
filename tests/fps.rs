@@ -44,3 +44,24 @@ fn not_a_rotation_is_mixed_as_numbers() {
     b[0] = 4.0;
     assert_eq!(blend(&a, &b, PLACE_N, 0.5)[0], 3.0);
 }
+
+fn at(x: f32) -> [f32; rust_metal::platform::fps::PLACE_N] {
+    let mut p = [0.0; rust_metal::platform::fps::PLACE_N];
+    p[9] = x;
+    p
+}
+
+#[test]
+fn places_at_one_address_follow_the_nearest() {
+    use rust_metal::platform::fps::partner;
+    // two blades of grass drawn through one address, in the other order at the next tick, and
+    // one more in view
+    let prev = [at(0.0), at(100.0)];
+    let cur = [(at(101.0), true), (at(1.0), true), (at(50.0), true)];
+    assert_eq!(partner(&prev, &cur, &at(1.0)), Some(at(0.0)));
+    assert_eq!(partner(&prev, &cur, &at(101.0)), Some(at(100.0)));
+    // the new one: both of the tick before have a nearer place now
+    assert_eq!(partner(&prev, &cur, &at(50.0)), None);
+    // nothing at the tick before
+    assert_eq!(partner(&[], &cur, &at(1.0)), None);
+}
