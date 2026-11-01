@@ -211,6 +211,7 @@ pub fn game_frame(c: &mut Cpu) {
     if ticks::on() {
         ticks::frame();
     }
+    super::tick::join();
     super::tick::frame();
     IN_FRAME.store(true, Ordering::Relaxed);
     call_original(c, GAME_FRAME);
@@ -239,6 +240,19 @@ pub fn game_frame(c: &mut Cpu) {
     }
 }
 
+/// Inside game_frame (main thread).
+pub fn in_frame() -> bool {
+    IN_FRAME.load(Ordering::Relaxed)
+}
+
+/// The game time of what is drawn: game time (+0x4dc), less one step while a tick runs on
+/// the tick thread (its part 0 has moved the game time on, but A shows the tick before).
+fn world_time(p: u32) -> u32 {
+    let m = mem();
+    let t = m.rd32(p + 0x4dc);
+    if super::tick::inflight() { t.wrapping_sub(m.rd32(p + 0x4c8)) } else { t }
+}
+
 /// How far between the last two ticks to draw (0..1), or None: not now.
 fn alpha() -> Option<f32> {
     if !smooth() || !IN_FRAME.load(Ordering::Relaxed) || IN_TICK.get() != 0 {
@@ -250,7 +264,7 @@ fn alpha() -> Option<f32> {
     if m.rd32(p + 0x4c4) == 0 || step <= 0 {
         return None;
     }
-    let (real, game) = (m.rd32(p + 0x360), m.rd32(p + 0x4dc));
+    let (real, game) = (m.rd32(p + 0x360), world_time(p));
     let frame = FRAMES.load(Ordering::Relaxed);
     let mut clock = CLOCK.lock().unwrap();
     if let Some((f, g, a)) = clock.fixed {
@@ -271,7 +285,7 @@ fn alpha() -> Option<f32> {
 fn place(key: u32, now: &[f32; PLACE_N], n: usize, alpha: f32) -> Option<[f32; PLACE_N]> {
     let m = mem();
     let p = m.rd32(PROJ_DATA);
-    let (t, step) = (m.rd32(p + 0x4dc), m.rd32(p + 0x4c8));
+    let (t, step) = (world_time(p), m.rd32(p + 0x4c8));
     let frame = FRAMES.load(Ordering::Relaxed);
     let mut guard = STATE.lock().unwrap();
     let s = guard.get_or_insert_with(State::default);
@@ -577,6 +591,8 @@ pub fn in_tick() -> bool {
 }
 
 fn tick_part(c: &mut Cpu, i: usize) {
+    // a tick still running on the tick thread ends before the next one's parts
+    super::tick::join();
     let outer = IN_TICK.get() == 0;
     IN_TICK.set(IN_TICK.get() + 1);
     let aids = outer && ticks::on();
@@ -594,7 +610,8 @@ fn tick_part(c: &mut Cpu, i: usize) {
     if let Some(t) = t {
         frames::part_end(i, t);
     }
-    if aids && i == TICK_PARTS.len() - 1 {
+    // a tick on the tick thread ends at its join (`tick::join`)
+    if aids && i == TICK_PARTS.len() - 1 && !super::tick::inflight() {
         ticks::tick_end(world);
     }
 }

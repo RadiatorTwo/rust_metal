@@ -280,11 +280,12 @@ pub fn copy_range(from: &Memory, to: &[&Memory], lo: u32, hi: u32) {
 }
 
 /// The tick's bytes into `a`: every byte where `b` differs from the base `c`. Returns how
-/// many bytes `a` had changed too (A != C there: a conflict, the tick won).
-pub fn merge_bytes(a: &mut [u8], b: &[u8], c: &[u8]) -> usize {
+/// many bytes `a` had changed too (A != C there: a conflict, the tick won); the first
+/// `MAX_AT` of them go to `at` as guest addresses (`base` is `a[0]`'s).
+pub fn merge_bytes(a: &mut [u8], b: &[u8], c: &[u8], base: u32, at: &mut Vec<u32>) -> usize {
     let mut conflicts = 0;
     let (ac, bc, cc) = (a.chunks_exact_mut(8), b.chunks_exact(8), c.chunks_exact(8));
-    for ((a8, b8), c8) in ac.zip(bc).zip(cc) {
+    for (i, ((a8, b8), c8)) in ac.zip(bc).zip(cc).enumerate() {
         let (bv, cv) = (u64::from_ne_bytes(b8.try_into().unwrap()), u64::from_ne_bytes(c8.try_into().unwrap()));
         if bv == cv {
             continue;
@@ -299,9 +300,15 @@ pub fn merge_bytes(a: &mut [u8], b: &[u8], c: &[u8]) -> usize {
             }
         }
         let ad = (av ^ cv) & mask;
-        for k in 0..8 {
-            if ad >> (8 * k) & 0xff != 0 {
-                conflicts += 1;
+        if ad != 0 {
+            let off = 8 * i as u32;
+            for k in 0..8 {
+                if ad >> (8 * k) & 0xff != 0 {
+                    conflicts += 1;
+                    if at.len() < MAX_AT {
+                        at.push(base + off + k);
+                    }
+                }
             }
         }
         a8.copy_from_slice(&((av & !mask) | (bv & mask)).to_ne_bytes());
@@ -311,6 +318,9 @@ pub fn merge_bytes(a: &mut [u8], b: &[u8], c: &[u8]) -> usize {
         if b[i] != c[i] {
             if a[i] != c[i] {
                 conflicts += 1;
+                if at.len() < MAX_AT {
+                    at.push(base + i as u32);
+                }
             }
             a[i] = b[i];
         }
@@ -318,8 +328,11 @@ pub fn merge_bytes(a: &mut [u8], b: &[u8], c: &[u8]) -> usize {
     conflicts
 }
 
+/// Conflicting bytes listed per merge (`Merged::at`).
+pub const MAX_AT: usize = 64;
+
 /// What a merge did.
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct Merged {
     /// pages the tick wrote and A did not: copied
     pub copied: usize,
@@ -327,6 +340,8 @@ pub struct Merged {
     pub merged: usize,
     /// bytes both changed (the tick's value kept)
     pub conflicts: usize,
+    /// the first `MAX_AT` of them
+    pub at: Vec<u32>,
 }
 
 /// Bring the tick's writes (B's marked pages, taken) into A: a page A has not written since
@@ -358,7 +373,7 @@ pub fn merge(w: &Worlds, ranges: &[(usize, usize)], skip: (u32, u32)) -> Merged 
                     let a = std::slice::from_raw_parts_mut(w.a.base.add(x), y - x);
                     let b = std::slice::from_raw_parts(w.b.base.add(x), y - x);
                     let c = std::slice::from_raw_parts(w.c.base.add(x), y - x);
-                    m.conflicts += merge_bytes(a, b, c);
+                    m.conflicts += merge_bytes(a, b, c, x as u32, &mut m.at);
                 } else {
                     std::ptr::copy_nonoverlapping(w.b.base.add(x), w.a.base.add(x), y - x);
                 }
@@ -509,7 +524,7 @@ mod tests {
         w.a.wr8(0x10_2003, 0x33);
         w.a.wr8(0x10_2008, 0x44);
         let m = merge(&w, &r, (0, 0));
-        assert_eq!(m, Merged { copied: 1, merged: 1, conflicts: 1 });
+        assert_eq!(m, Merged { copied: 1, merged: 1, conflicts: 1, at: vec![0x10_2003] });
         assert_eq!(w.a.rd32(0x10_0000), 2);
         assert_eq!(w.a.rd32(0x10_2000), 0x2222_1111); // the tick won its bytes
         assert_eq!(w.a.rd8(0x10_2008), 0x44); // the drawing kept its own
@@ -609,7 +624,9 @@ mod tests {
         a[1] = 3;
         a[2] = 4;
         a[10] = 5;
-        assert_eq!(merge_bytes(&mut a, &b, &c), 2);
+        let mut at = Vec::new();
+        assert_eq!(merge_bytes(&mut a, &b, &c, 0x1000, &mut at), 2);
+        assert_eq!(at, vec![0x1001, 0x100a]);
         assert_eq!(a, [0, 1, 4, 0, 0, 0, 0, 0, 0, 0, 2]);
     }
 }

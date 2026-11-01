@@ -41,9 +41,9 @@ fn run() -> i32 {
     let found = t.elapsed().as_millis();
     // the machine code is kept in the game folder, for this program and this file
     let cache = dir.join("compiled.bin");
-    let hooks = rust_metal::platform::hooks();
-    // the tick thread needs the pages generated code writes (rt::marking)
+    // the tick thread needs the pages generated code writes (rt::marking) and its hooks
     rust_metal::rt::set_marking(rust_metal::platform::world::mode(&dir) != rust_metal::platform::world::Mode::Off);
+    let hooks = rust_metal::platform::hooks();
     let key = cache_key(&game, &hooks);
     let compiled = compile_cached(&prog, &smc, &mut code, &hooks, key.map(|k| (cache.as_path(), k)));
     let st = &compiled.stats;

@@ -290,6 +290,21 @@ Left to do by hand: an in-mission menu and leaving the mission.
 
 ### Step 4: overlap and check mode (joined at the latest at the next game_frame)
 
+In progress 2026-11-01. Built: fork without waiting (`ret 4` emulated), join points (game_frame,
+every tick part, a main-thread import outside game_frame), `fps::world_time` (game time less a
+step while a tick runs), check mode's conflict addresses. Found and ruled:
+- the game's pool of 12-byte nodes (pool_alloc 0x55e5b0, pool_free 0x55e670, free list
+  0x76c2d4): both worlds handed out the same node (fault in pool_alloc at the first overlap).
+  Now hooked: one list in A under a lock, frees held back to the join (`tick::pool_*`).
+- llists (count +0, head +4, tail +8, cursor +0xc; ops 0x55e6d0 remove, 0x55e740/0x55e840/
+  0x55e910 insert; the cursor also moved inline): a header is merged whole from the side that
+  changed the list by an op (`tick::lists_merge`).
+Still open: with overlap (`1`/`check`) the main thread hangs after the first join in the
+clearing loop 0x54ec00 (list at +0x24 of its object, from 0x54ed50) calling remove (0x55e6d0)
+for ever: a list still broken after the merge. The first join: 426 pages copied, 306 merged,
+100 bytes both changed (renderer state 0x6bc374..0x6bc3b2, camera 0x72a7d8..). `serial` with
+the hooks: mission and exit fine.
+
 - [ ] The main thread draws while the worker runs P6; join points 1-3; alpha clamped to 1.
 - [ ] `check`: 3 runs of at least 2 minutes; a list of conflicting addresses grouped by
       structure, saved with the findings.

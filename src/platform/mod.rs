@@ -584,6 +584,11 @@ fn on_event(c: &mut Cpu, e: Event) {
                 tick_import(c, k, f, nargs);
                 return;
             }
+            // the main thread outside game_frame sees no tick half done (the message pump,
+            // mission teardown, saving)
+            if tick::inflight() && world::role() == world::Role::Main && !fps::in_frame() {
+                tick::join();
+            }
             LAST_CALL.store(mem().rd32(c.r[ESP]), std::sync::atomic::Ordering::Relaxed);
             crash::note_import(c, k);
             if frames::on() {
@@ -635,7 +640,13 @@ fn on_event(c: &mut Cpu, e: Event) {
 
 /// An import called on the tick thread (`world::tick_rule`): no turn, Direct3D setters
 /// recorded for the join.
+static TICK_LAST: AtomicU32 = AtomicU32::new(0);
+static TICK_RET: AtomicU32 = AtomicU32::new(0);
+static TICK_IN: AtomicBool = AtomicBool::new(false);
+
 fn tick_import(c: &mut Cpu, k: usize, f: ImpFn, nargs: u32) {
+    TICK_LAST.store(k as u32 + 1, Ordering::Relaxed);
+    TICK_RET.store(mem().rd32(c.r[ESP]), Ordering::Relaxed);
     use world::TickRule;
     static RULES: [std::sync::atomic::AtomicU8; THUNK_N as usize] = [const { std::sync::atomic::AtomicU8::new(0) }; THUNK_N as usize];
     let rule = match RULES[k].load(Ordering::Relaxed) {
@@ -661,7 +672,10 @@ fn tick_import(c: &mut Cpu, k: usize, f: ImpFn, nargs: u32) {
         world::record(k, (0..nargs).map(|n| arg(c, n)).collect(), rule, mem());
         0 // D3D_OK
     } else {
-        f(c)
+        TICK_IN.store(true, Ordering::Relaxed);
+        let r = f(c);
+        TICK_IN.store(false, Ordering::Relaxed);
+        r
     };
     c.r[EAX] = r;
     c.r[ESP] += 4 + 4 * nargs;
@@ -1016,6 +1030,9 @@ pub fn hooks() -> Vec<(u32, crate::rt::Hook)> {
     if ticks::hooks_wanted() {
         h.extend_from_slice(&ticks::HOOKS);
     }
+    if rt::marking() {
+        h.extend_from_slice(&tick::HOOKS);
+    }
     h
 }
 
@@ -1128,6 +1145,10 @@ pub fn run_game(game: &crate::game::Game, game_dir: PathBuf) -> u32 {
             std::thread::sleep(std::time::Duration::from_secs(2));
             let t = *lock(&TURN.tickets);
             log!("watch: last import call returned to {:#x}, turn {}/{}, poll {}", LAST_CALL.load(Ordering::Relaxed), t.1, t.0, rt::POLL.load(Ordering::Relaxed));
+            if tick::inflight() {
+                let k = TICK_LAST.load(Ordering::Relaxed);
+                log!("watch: tick running; its last import {} ({}), from {:#x}", if k == 0 { "none".into() } else { thunk_name(k as usize - 1) }, if TICK_IN.load(Ordering::Relaxed) { "inside" } else { "returned" }, TICK_RET.load(Ordering::Relaxed));
+            }
         });
     }
     if let Some(path) = rt::count_file() {
