@@ -266,6 +266,14 @@ pub fn shutdown(c: &mut Cpu) {
     call_original(c, SHUTDOWN);
 }
 
+/// The calling guest thread's stack now (`c` its state), for a report.
+pub fn stack_here(c: &Cpu) -> Vec<String> {
+    let who = slot().map_or("an unregistered host thread".to_string(), thread_line);
+    let mut out = vec![format!("  {who}")];
+    out.extend(stack_report(c.r[ESP], c.r[EBP], c.fs_base));
+    out
+}
+
 /// For a fault in guest code: the faulting thread's stack as it was at its last import call
 /// (the registers of the faulting moment are not at hand; the outer frames are shared).
 pub fn last_import_stack() -> Vec<String> {

@@ -348,25 +348,26 @@ static VTABLES: Mutex<Vec<(usize, u32)>> = Mutex::new(Vec::new());
 /// entries are `thunk_not_implemented`). `extra` bytes follow the vtable pointer for the
 /// caller's use.
 pub fn com_new(methods: &'static [Import], extra: u32) -> u32 {
-    let vt = {
-        let key = methods.as_ptr() as usize;
-        let found = lock(&VTABLES).iter().find(|e| e.0 == key).map(|e| e.1);
-        match found {
-            Some(v) => v,
-            None => {
-                let v = alloc(4 * methods.len() as u32);
-                for (k, &(name, n, f)) in methods.iter().enumerate() {
-                    let t = if f as usize == method_not_implemented as ImpFn as usize { thunk_not_implemented(name, n) } else { thunk(name, n, f) };
-                    mem().wr32(v + 4 * k as u32, t);
-                }
-                lock(&VTABLES).push((key, v));
-                v
-            }
-        }
-    };
+    let vt = com_vtable(methods);
     let obj = alloc(4 + extra);
     mem().wr32(obj, vt);
     obj
+}
+
+/// The guest vtable of thunks for a method table (made at its first use).
+pub fn com_vtable(methods: &'static [Import]) -> u32 {
+    let key = methods.as_ptr() as usize;
+    let mut vts = lock(&VTABLES);
+    if let Some(v) = vts.iter().find(|e| e.0 == key).map(|e| e.1) {
+        return v;
+    }
+    let v = alloc(4 * methods.len() as u32);
+    for (k, &(name, n, f)) in methods.iter().enumerate() {
+        let t = if f as usize == method_not_implemented as ImpFn as usize { thunk_not_implemented(name, n) } else { thunk(name, n, f) };
+        mem().wr32(v + 4 * k as u32, t);
+    }
+    vts.push((key, v));
+    v
 }
 
 // ---- guest threads take turns ------------------------------------------------------------------

@@ -241,9 +241,17 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
       d3d_lost_release 0x46f190). Seen twice with a real loss (UAC); a simulated loss
       (`lose*ms`, also with blur/focus during it) goes through Reset fine, and the next UAC
       try of the user's did not crash: a race. Guest faults now log the thread's stack as at
-      its last import (`crash::last_import_stack`). Also seen twice: a null read at a mission
-      start in the first run after a rebuild (freshly compiled code, not compiled.bin; last
-      import IDirect3DSurface9::GetContainer from 0x4712b0).
+      its last import (`crash::last_import_stack`).
+      Fixed (2026-11-01): a null read at a mission start (seen twice in ~30 cold starts; not
+      tied to rebuilds, 12 fresh compiles ran fine). The game's Lock of a vertex buffer
+      (0x471cff, vtable slot 11) reached IDirect3DSurface9::GetContainer (riid 0): the buffer's
+      guest object was a surface's. `com::wrap` maps host pointers to guest objects, and a
+      texture's surface answers Release with the texture's count, so its entry stayed after the
+      texture went (2500 stale surface entries by mission 1); a new host object at that address
+      got the old guest object. Now a texture's surfaces go with it (`com::adopt`), an entry of
+      another interface at a reused address is retired (logged "com: host object ... is new"),
+      and released guest objects keep a vtable that reports any later call ("a method of the
+      released COM object") for 4096 releases before their memory is reused.
 - [ ] Frame rate: even frame times (docs/superpowers/plans/2026-10-30-tick-decoupling.md,
       design (a) chosen: the tick on a second thread; on hold, see above). Baseline 2026-10-31, corrected
       (`GUNMETAL_FRAMES` without page probes, 3 cold runs of the profile script, mission 1,

@@ -437,7 +437,11 @@ fn get_surface_level(c: &mut Cpu) -> u32 {
     if r.is_ok() {
         super::ex::surface_of(s, p, arg(c, 1), false);
     }
-    created(r, s, SURFACE, arg(c, 2), "GetSurfaceLevel")
+    let r = created(r, s, SURFACE, arg(c, 2), "GetSurfaceLevel");
+    if r == 0 {
+        com::adopt(mem().rd32(arg(c, 2)), arg(c, 0));
+    }
+    r
 }
 
 fn unlock_rect(c: &mut Cpu) -> u32 {
@@ -512,7 +516,11 @@ fn get_cube_map_surface(c: &mut Cpu) -> u32 {
     if r.is_ok() {
         super::ex::surface_of(s, p, face_key(arg(c, 1), arg(c, 2)), true);
     }
-    created(r, s, SURFACE, arg(c, 3), "GetCubeMapSurface")
+    let r = created(r, s, SURFACE, arg(c, 3), "GetCubeMapSurface");
+    if r == 0 {
+        com::adopt(mem().rd32(arg(c, 3)), arg(c, 0));
+    }
+    r
 }
 
 /// LockRect(face, level, locked rect, rect, flags).

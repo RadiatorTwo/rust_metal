@@ -157,7 +157,8 @@ MANAGED does not exist on 9Ex: managed buffers are created in the default pool, 
 and cube textures in the default pool with a system-memory twin that their locks (also through a
 level's surface) go to, uploaded with UpdateTexture at each unlock; GetDesc/GetLevelDesc still say
 MANAGED. No device loss on 9Ex (TestCooperativeLevel S_OK; the simulated loss still works).
-Every interface the game holds is a guest COM object (`com::wrap`) with our
+Every interface the game holds is a guest COM object (`com::wrap`; a texture's surfaces are
+dropped with it, `com::adopt`; released objects get a vtable that reports a stale call) with our
 vtable in the SDK's order (IDirect3D9 17 methods, IDirect3DDevice9 119); a method finds the host
 interface behind `this` and calls the real one. Structures without pointers are passed in place
 (guest memory is host memory at `mem().base`); D3DPRESENT_PARAMETERS and
