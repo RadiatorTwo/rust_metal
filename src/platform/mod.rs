@@ -35,6 +35,7 @@ pub mod user32;
 pub mod video;
 pub mod window;
 pub mod winmm;
+pub mod world;
 
 pub use crate::image::ResId;
 use crate::image::Image;
@@ -60,9 +61,19 @@ const RET_MAGIC: u32 = 0x7ffe_0000;
 
 static MEM: OnceLock<Memory> = OnceLock::new();
 
-/// Guest memory.
+thread_local! {
+    /// The memory this thread works in when not the game's (`world`: the tick thread's B).
+    static WORLD: std::cell::Cell<Option<&'static Memory>> = const { std::cell::Cell::new(None) };
+}
+
+/// Guest memory: the game's, or on the tick thread its own copy (`set_world`).
 pub fn mem() -> &'static Memory {
-    MEM.get().expect("guest memory not set up")
+    WORLD.with(|w| w.get()).unwrap_or_else(|| MEM.get().expect("guest memory not set up"))
+}
+
+/// This thread's memory from now on (None: the game's).
+pub fn set_world(m: Option<&'static Memory>) {
+    WORLD.with(|w| w.set(m));
 }
 
 macro_rules! log {
@@ -727,6 +738,11 @@ pub fn new_thread_cpu() -> Cpu {
 static GAME_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// The game's folder (the installed game: Gunmetal.exe, data\...).
+/// Set the game folder before `run_game` (settings read before compiling).
+pub fn set_game_dir(dir: &Path) {
+    let _ = GAME_DIR.set(dir.to_path_buf());
+}
+
 pub fn game_dir() -> &'static Path {
     GAME_DIR.get().expect("game folder not set")
 }
@@ -998,6 +1014,10 @@ pub fn heap_top() -> u32 {
 pub fn run_game(game: &crate::game::Game, game_dir: PathBuf) -> u32 {
     let _ = GAME_DIR.set(game_dir);
     let m = init_memory();
+    if rt::marking() {
+        // the tick thread's copies of guest memory, mapped with it from now on
+        world::setup(m);
+    }
     m.map(TIB, TIB + 0x1000);
     m.map(STACK_LO, STACK_HI);
     m.map(RET_MAGIC, RET_MAGIC + 0x1000);

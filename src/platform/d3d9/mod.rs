@@ -44,8 +44,13 @@ pub fn fpu_after_create_device(cw: u16, flags: u32) -> u16 {
 }
 
 /// A host pointer to guest memory at `a` (null for 0), for structures with the same layout.
+/// The structure's pages are marked as written (`rt::MAP_OFF`): Direct3D may fill it.
 pub(crate) fn gp<T>(a: u32) -> *mut T {
-    if a == 0 { std::ptr::null_mut() } else { unsafe { mem().base.add(a as usize) as *mut T } }
+    if a == 0 {
+        return std::ptr::null_mut();
+    }
+    mem().mark(a, std::mem::size_of::<T>());
+    unsafe { mem().base.add(a as usize) as *mut T }
 }
 
 /// A host pointer to guest memory at `a` for reading (null for 0).

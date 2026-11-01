@@ -345,8 +345,25 @@ impl<'a, 'f> Lifter<'a, 'f> {
         self.b.ins().load(ty(size), mf(), p, 0)
     }
     fn store(&mut self, a: Value, v: Value) {
+        self.mark(a, 0);
         let p = self.host(a);
         self.b.ins().store(mf(), v, p, 0);
+    }
+    /// Set the written-page map's byte (`rt::MAP_OFF`) of guest address `a + off`, when
+    /// `rt::marking()` (the tick thread is on). Only the store's first byte: a store across a
+    /// page end writes at most 7 bytes of the next page, which `platform::world` copies with
+    /// every marked page. Stores through esp (push, call, `[esp+x]`) are not marked: they
+    /// write stacks, which `platform::world` copies whole.
+    fn mark(&mut self, a: Value, off: i32) {
+        if !crate::rt::marking() {
+            return;
+        }
+        let a = if off != 0 { self.b.ins().iadd_imm_s(a, off as i64) } else { a };
+        let pg = self.b.ins().ushr_imm_u(a, 12);
+        let pg = self.b.ins().uextend(I64, pg);
+        let at = self.b.ins().iadd(self.mem, pg);
+        let one = self.b.ins().iconst(I8, 1);
+        self.b.ins().store(mf(), one, at, -(crate::rt::MAP_OFF as i32));
     }
 
     /// The effective address of the instruction's memory operand (guest address, i32).
@@ -380,25 +397,31 @@ impl<'a, 'f> Lifter<'a, 'f> {
     /// sum is not cut to 32 bits, which differs only where reg+disp wraps around 4 GB, an
     /// address no valid access uses. With an index (MSVC's negative indexes and
     /// `[dst+src-dst]` copies wrap on purpose) the 32-bit address is computed as `addr` does.
-    fn mem_at(&mut self, i: &Instruction) -> (Value, i32) {
+    fn mem_at(&mut self, i: &Instruction, mark: bool) -> (Value, i32) {
         let simple = i.memory_base() != Register::None
             && i.memory_index() == Register::None
             && i.memory_segment() != Register::FS
             && !self.smc.disp.contains_key(&i.ip32());
         if simple {
             let b = self.reg(gpr(i.memory_base()));
+            if mark && i.memory_base() != Register::ESP {
+                self.mark(b, i.memory_displacement32() as i32);
+            }
             (self.host(b), i.memory_displacement32() as i32)
         } else {
             let a = self.addr(i);
+            if mark {
+                self.mark(a, 0);
+            }
             (self.host(a), 0)
         }
     }
     fn load_mem(&mut self, i: &Instruction, t: Type) -> Value {
-        let (p, off) = self.mem_at(i);
+        let (p, off) = self.mem_at(i, false);
         self.b.ins().load(t, mf(), p, off)
     }
     fn store_mem(&mut self, i: &Instruction, v: Value) {
-        let (p, off) = self.mem_at(i);
+        let (p, off) = self.mem_at(i, true);
         self.b.ins().store(mf(), v, p, off);
     }
 
@@ -491,7 +514,9 @@ impl<'a, 'f> Lifter<'a, 'f> {
         let sp = self.reg(4);
         let sp = self.b.ins().iadd_imm_s(sp, -4);
         self.set_reg(4, sp);
-        self.store(sp, v);
+        // a stack: not marked (see `mark`)
+        let p = self.host(sp);
+        self.b.ins().store(mf(), v, p, 0);
     }
     fn pop32(&mut self) -> Value {
         let sp = self.reg(4);

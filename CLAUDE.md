@@ -302,6 +302,10 @@ game time, camera place, objects per id type, hashes of the units and the player
 `GUNMETAL_TICK_PRINT_UNITS=<tick>[,..]` adds the units' hashed values at those ticks,
 `GUNMETAL_TICK_PRINT_RAND=1` each tick's `_rand` callers in order; a script item `stall*ms` sleeps
 the main thread so the next frame runs 2-3 ticks),
+`GUNMETAL_TICK_THREAD` (`0`/`1`/`serial`/`check`, registry `TickThread`; the tick on a second
+thread, `platform/world.rs`, in progress: so far only the page map and worlds B and C; on makes
+generated stores mark their page, `rt::MAP_OFF`), `GUNMETAL_WORLD_VERIFY=1` (with it: every
+2 s B is synced and compared with A, unmarked written pages logged),
 `GUNMETAL_TICK_PROBE=1` (the tick thread's step-0 measurements, logged at the exit: C runtime heap
 type, malloc/free and `_rand` in and outside ticks with callers, the router's per-frame method,
 GetWriteWatch costs and the committed size; either TICK variable adds `ticks::HOOKS`, part of the

@@ -86,6 +86,40 @@ pub const GUEST_SPAN: usize = (1 << 32) + 0x1000;
 
 pub struct Memory {
     pub base: *mut u8,
+    /// The mapped ranges [lo, hi) in the order they were mapped (page-aligned).
+    ranges: std::sync::Mutex<Vec<(u32, u32)>>,
+    /// Memories that get every `map` of this one too (the tick thread's worlds,
+    /// `platform::world`).
+    twins: OnceLock<Vec<&'static Memory>>,
+}
+
+/// Number of guest pages, one more for the page past 4 GB.
+pub const PAGES: usize = GUEST_SPAN >> 12;
+/// The written-page map, one byte per 4 KB guest page, lies this far below guest address 0:
+/// generated stores (`lift::Lifter::mark`, only when `marking()`) reach it from `Cpu::mem`
+/// with a constant offset, host writes through `wr*`, `slice` and `mark`. Read and cleared by
+/// `platform::world`.
+pub const MAP_OFF: usize = (PAGES + 0xffff) & !0xffff;
+
+static MARKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether generated code marks the pages it writes (set before compiling: the tick thread is
+/// on; part of the compiled code's cache key).
+pub fn marking() -> bool {
+    MARKING.load(std::sync::atomic::Ordering::Relaxed)
+}
+pub fn set_marking(on: bool) {
+    MARKING.store(on, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Mark guest bytes [a, a + n) as written in the page map of the memory whose guest address
+/// 0 is at `base`.
+pub fn mark(base: *mut u8, a: u32, n: usize) {
+    if n == 0 {
+        return;
+    }
+    let (lo, hi) = (a as usize >> 12, (a as usize + n - 1) >> 12);
+    unsafe { std::ptr::write_bytes(base.sub(MAP_OFF).add(lo), 1, hi.min(PAGES - 1) + 1 - lo.min(PAGES - 1)) };
 }
 
 // guest memory is shared by the guest threads, which take turns (see `platform`)
@@ -93,28 +127,66 @@ unsafe impl Send for Memory {}
 unsafe impl Sync for Memory {}
 
 impl Memory {
+    /// The game's memory: with write watch (frame probes find the pages a picture writes).
     pub fn reserve() -> Memory {
+        Memory::reserve_with(true)
+    }
+
+    /// A 4 GB guest address space with its page map in front, nothing mapped.
+    pub fn reserve_with(write_watch: bool) -> Memory {
         #[cfg(windows)]
         let base = unsafe {
-            use windows_sys::Win32::System::Memory::{MEM_RESERVE, PAGE_NOACCESS, VirtualAlloc};
+            use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEM_RESERVE, PAGE_NOACCESS, PAGE_READWRITE, VirtualAlloc};
             const MEM_WRITE_WATCH: u32 = 0x20_0000;
-            // write watch: the pages an extra picture writes are found by it (platform::fps)
-            VirtualAlloc(std::ptr::null(), GUEST_SPAN, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_NOACCESS) as *mut u8
+            let flags = MEM_RESERVE | if write_watch { MEM_WRITE_WATCH } else { 0 };
+            let p = VirtualAlloc(std::ptr::null(), MAP_OFF + GUEST_SPAN, flags, PAGE_NOACCESS) as *mut u8;
+            if p.is_null() || VirtualAlloc(p as _, MAP_OFF, MEM_COMMIT, PAGE_READWRITE).is_null() { std::ptr::null_mut() } else { p.add(MAP_OFF) }
         };
         #[cfg(unix)]
         let base = unsafe {
+            let _ = write_watch;
             let p = libc::mmap(
                 std::ptr::null_mut(),
-                GUEST_SPAN,
+                MAP_OFF + GUEST_SPAN,
                 libc::PROT_NONE,
                 libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
                 -1,
                 0,
             );
-            if p == libc::MAP_FAILED { std::ptr::null_mut() } else { p as *mut u8 }
+            if p == libc::MAP_FAILED || libc::mprotect(p, MAP_OFF, libc::PROT_READ | libc::PROT_WRITE) != 0 {
+                std::ptr::null_mut()
+            } else {
+                (p as *mut u8).add(MAP_OFF)
+            }
         };
         assert!(!base.is_null(), "cannot reserve 4 GB of address space");
-        Memory { base }
+        Memory { base, ranges: std::sync::Mutex::new(Vec::new()), twins: OnceLock::new() }
+    }
+
+    /// The page map: byte `a >> 12` is nonzero when guest page `a` was written.
+    pub fn pages(&self) -> &[std::sync::atomic::AtomicU8] {
+        unsafe { std::slice::from_raw_parts(self.base.sub(MAP_OFF) as *const std::sync::atomic::AtomicU8, PAGES) }
+    }
+
+    /// Mark guest bytes [a, a + n) as written.
+    pub fn mark(&self, a: u32, n: usize) {
+        mark(self.base, a, n)
+    }
+
+    /// The mapped ranges so far.
+    pub fn ranges(&self) -> Vec<(u32, u32)> {
+        self.ranges.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// From now on map `twins` with this memory, and map them now as this memory is.
+    pub fn set_twins(&self, twins: Vec<&'static Memory>) {
+        let r = self.ranges.lock().unwrap_or_else(|e| e.into_inner());
+        for t in &twins {
+            for &(lo, hi) in r.iter() {
+                t.map(lo, (hi as u64).min(u32::MAX as u64) as u32);
+            }
+        }
+        let _ = self.twins.set(twins);
     }
 
     /// Make guest addresses [lo, hi) readable and writable.
@@ -130,27 +202,43 @@ impl Memory {
         #[cfg(unix)]
         let ok = unsafe { libc::mprotect(p as _, n, libc::PROT_READ | libc::PROT_WRITE) == 0 };
         assert!(ok, "cannot map guest memory {lo:#x}..{hi:#x}");
+        let mut r = self.ranges.lock().unwrap_or_else(|e| e.into_inner());
+        r.push((lo, hi.min(u32::MAX as u64 + 1 - 0x1000) as u32));
+        if let Some(t) = self.twins.get() {
+            for t in t {
+                t.map(lo, hi.min(u32::MAX as u64) as u32);
+            }
+        }
     }
 
+    /// Guest bytes [a, a + n) for the host to read or write (marked as written).
     pub fn slice(&self, a: u32, n: usize) -> &mut [u8] {
+        self.mark(a, n);
         unsafe { std::slice::from_raw_parts_mut(self.base.add(a as usize), n) }
+    }
+    /// As `slice`, for reading only (not marked).
+    pub fn bytes(&self, a: u32, n: usize) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.base.add(a as usize), n) }
     }
     pub fn rd8(&self, a: u32) -> u8 {
         unsafe { *self.base.add(a as usize) }
     }
     pub fn wr8(&self, a: u32, v: u8) {
+        self.mark(a, 1);
         unsafe { *self.base.add(a as usize) = v }
     }
     pub fn rd16(&self, a: u32) -> u16 {
         unsafe { (self.base.add(a as usize) as *const u16).read_unaligned() }
     }
     pub fn wr16(&self, a: u32, v: u16) {
+        self.mark(a, 2);
         unsafe { (self.base.add(a as usize) as *mut u16).write_unaligned(v) }
     }
     pub fn rd32(&self, a: u32) -> u32 {
         unsafe { (self.base.add(a as usize) as *const u32).read_unaligned() }
     }
     pub fn wr32(&self, a: u32, v: u32) {
+        self.mark(a, 4);
         unsafe { (self.base.add(a as usize) as *mut u32).write_unaligned(v) }
     }
 }
@@ -385,6 +473,14 @@ pub extern "C" fn rt_string(cpu: *mut Cpu, op: u32) {
         }
     };
     let step = if c.df != 0 { (size as u32).wrapping_neg() } else { size };
+    if kind <= 1 {
+        // movs/stos write [edi, edi + count * size) (backwards with DF: ending at edi + size)
+        let count = if rep != 0 { c.r[ECX] as u64 } else { 1 };
+        let bytes = count * size as u64;
+        let d = c.r[EDI] as u64;
+        let lo = if c.df != 0 { (d + size as u64).saturating_sub(bytes) } else { d };
+        mark(m, lo as u32, bytes.min((1u64 << 32) - lo) as usize);
+    }
     let mask = if size == 4 { u32::MAX } else { (1u32 << (8 * size)) - 1 };
     // rep movs / rep stos forwards in one go, unless a copy overlaps so that it repeats what
     // it wrote (destination inside the source)
@@ -579,6 +675,10 @@ pub fn f64_to_f80(v: f64) -> [u8; 10] {
 /// x87 operations that are rare or need libm; `op` is an `X87`.
 pub extern "C" fn rt_x87(cpu: *mut Cpu, op: u32, addr: u32) {
     let c = unsafe { &mut *cpu };
+    if addr != 0 {
+        // the largest x87 store (fsave: 108 bytes); a read marked too does no harm
+        mark(c.mem, addr, 108);
+    }
     let Some(&op) = X87_OPS.get(op as usize) else { die(format!("rt_x87: unknown operation {op}")) };
     let x = c.st(0);
     match op {

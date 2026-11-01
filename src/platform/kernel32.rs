@@ -812,6 +812,12 @@ fn create_thread(c: &mut Cpu) -> u32 {
             super::crash::register(super::crash::Kind::Thread, start, tc.fs_base);
             super::frames::thread_start(start);
             let r = guest_call(&mut tc, start, &[param]);
+            // its stack (TIB +8 limit, +4 base) may become heap: written without marks
+            // through esp (`world`), so marked whole now
+            let (lo, hi) = (mem().rd32(tc.fs_base + 8), mem().rd32(tc.fs_base + 4));
+            if lo < hi {
+                mem().mark(lo, (hi - lo) as usize);
+            }
             super::crash::unregister();
             let code = if tc.stop != 0 { EXIT_CODE.get() } else { r };
             let mut g = objects();

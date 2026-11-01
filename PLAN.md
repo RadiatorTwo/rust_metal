@@ -302,6 +302,10 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
       lock buffers ~50, .data ~10), the same heap ranges in every probe. A world copy for (a)
       would have to sync ~3.3 MB of pages per tick, and the drawing writes ~1.1 MB of pages
       that the tick writes too (object/node state, not only renderer data)
+      Resumed 2026-11-01 (the user). Step 1 done: worlds A, B, C (`platform/world.rs`) with
+      a page map written by generated stores instead of write watch (cost and checks in the
+      plan's step 1); off by default, no cost when off. Next: step 2 (thread roles, imports per
+      role).
       Step 0 of `docs/superpowers/plans/2026-10-31-tick-thread.md` (2026-10-31, `ticks.rs`,
       `GUNMETAL_TICK_PROBE`, `GUNMETAL_TICK_PRINT`, tick-indexed `GUNMETAL_INPUT` items `t<N>:`;
       report `.superpowers/perf/task-tt0-report.md`; mission 1, 651 ticks, ~14 cold runs):

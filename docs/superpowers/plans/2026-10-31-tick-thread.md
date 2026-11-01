@@ -218,6 +218,18 @@ the machinery without overlap); `check` (overlap plus the reports of 1.11).
 
 ### Step 1: three worlds (off by default)
 
+Done 2026-11-01, changed from 1.3: no write watch (GetWriteWatch with reset ~0.6 ms a call
+whatever the range, also in 16 MB reservations). Instead a page map per memory, one byte per
+4 KB page, `rt::MAP_OFF` bytes below guest address 0: generated stores set it (`Lifter::mark`,
+only when the tick thread is on: `rt::marking()`, part of the cache key), host writes through
+`Memory::wr*`/`slice`/`mark`, `rt_string`, `rt_x87`, `d3d9::gp`. Stores through esp are not
+marked (stacks are copied whole); a marked page also stands for the next page's first 8 bytes
+(stores across a page end). Cost (A/B): marking every store with the map pointer in a register
+-17 % fps; map at a constant offset from `Cpu::mem` and esp stores left out -5 % (guest time
++6-10 %); off: no change. `GUNMETAL_WORLD_VERIFY=1` compares A with B every 2 s after a sync:
+front end and mission 1 without unmarked pages but other threads' stacks (marked whole when
+the thread ends). Mission: ~2200 pages written per 2 s, a sync of them ~1.1 ms.
+
 - [ ] `world.rs` with A, B, C; `mem()` reads the thread-local world; `map` mirrored; initial
       copy; background sync; merge with masks and rules.
 - [ ] Tests (small reservations of their own): a page written on one side is copied; byte merge

@@ -330,6 +330,7 @@ fn test_cooperative_level(c: &mut Cpu) -> u32 {
 /// GUNMETAL_SHOT first when one is due. Without a rectangle of the game's, the picture keeps
 /// its aspect ratio in our window (`letterbox`).
 fn present(c: &mut Cpu) -> u32 {
+    crate::platform::world::verify_at_present();
     if let Some(q) = super::queue::global() {
         return present_queued(c, q);
     }
