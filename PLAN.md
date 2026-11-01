@@ -240,7 +240,7 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
         picture without a tick 0.71 -> 0.60 ms.
       - DirectSound's CommitDeferredSettings on a thread of its own (`dsound::committer`; a
         listener's Release waits for its commit): A/B 255-257 -> 257-260 fps, logic per tick
-        3.54 -> 3.38 ms. To be confirmed by ear: 3D sound positions in a mission.
+        3.54 -> 3.38 ms. 3D sound positions confirmed by the user (left/right).
       Tried and dropped (2026-11-01): the x87 control word and its rounding mode in Cranelift
         variables (set with the registers after calls and helpers, and by fldcw/fninit) instead
         of a load and two compares per arithmetic instruction: code 2 % smaller, but A/B
