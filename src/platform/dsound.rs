@@ -473,13 +473,83 @@ pass!(l_set_orientation: L3, SetOrientation, f 1, f 2, f 3, f 4, f 5, f 6, u 7);
 pass!(l_set_position: L3, SetPosition, f 1, f 2, f 3, u 4);
 pass!(l_set_rolloff_factor: L3, SetRolloffFactor, f 1, u 2);
 pass!(l_set_velocity: L3, SetVelocity, f 1, f 2, f 3, u 4);
-pass!(l_commit: L3, CommitDeferredSettings);
+
+/// CommitDeferredSettings, every picture for each of the game's two devices (DirectSound's own
+/// work, ~30 us a call): handed to a thread of its own (`committer`) and answered DS_OK at
+/// once. A commit still waiting there makes another of the same listener unnecessary; the
+/// settings made meanwhile go with it. The thread holds no reference: a listener's Release
+/// waits for its commit first (`l_release`).
+fn l_commit(c: &mut Cpu) -> u32 {
+    let p = com::host(arg(c, 0)) as usize;
+    let q = committer();
+    let mut pending = lock(&q.pending);
+    if !pending.contains(&p) {
+        pending.push(p);
+        q.work.notify_one();
+    }
+    0
+}
+
+/// IDirectSound3DListener::Release: after a commit of its still waiting (`l_commit`).
+fn l_release(c: &mut Cpu) -> u32 {
+    let p = com::host(arg(c, 0)) as usize;
+    let q = committer();
+    let mut pending = lock(&q.pending);
+    while pending.contains(&p) || *lock(&q.running) == p {
+        pending = q.done.wait(pending).unwrap_or_else(|e| e.into_inner());
+    }
+    drop(pending);
+    release(c)
+}
+
+struct Committer {
+    /// listeners to commit
+    pending: Mutex<Vec<usize>>,
+    /// the listener being committed (0 for none)
+    running: Mutex<usize>,
+    work: std::sync::Condvar,
+    done: std::sync::Condvar,
+}
+
+fn committer() -> &'static Committer {
+    static Q: std::sync::OnceLock<&'static Committer> = std::sync::OnceLock::new();
+    Q.get_or_init(|| {
+        let q: &'static Committer = Box::leak(Box::new(Committer {
+            pending: Mutex::new(Vec::new()),
+            running: Mutex::new(0),
+            work: std::sync::Condvar::new(),
+            done: std::sync::Condvar::new(),
+        }));
+        std::thread::Builder::new()
+            .name("dsound commit".into())
+            .spawn(move || {
+                let mut pending = lock(&q.pending);
+                loop {
+                    let Some(p) = pending.pop() else {
+                        pending = q.work.wait(pending).unwrap_or_else(|e| e.into_inner());
+                        continue;
+                    };
+                    *lock(&q.running) = p;
+                    drop(pending);
+                    let r = unsafe { (vtbl::<L3>(p as *mut c_void).CommitDeferredSettings)(p as *mut c_void) };
+                    if r.is_err() {
+                        log!("warn: dsound: CommitDeferredSettings -> {:#x}", r.0);
+                    }
+                    pending = lock(&q.pending);
+                    *lock(&q.running) = 0;
+                    q.done.notify_all();
+                }
+            })
+            .expect("dsound commit thread");
+        q
+    })
+}
 
 /// IDirectSound3DListener, in the SDK's order (18 methods).
 pub static LISTENER: &[Import] = &[
     ("IDirectSound3DListener::QueryInterface", 3, listener_qi),
     ("IDirectSound3DListener::AddRef", 1, add_ref),
-    ("IDirectSound3DListener::Release", 1, release),
+    ("IDirectSound3DListener::Release", 1, l_release),
     ("IDirectSound3DListener::GetAllParameters", 2, l_get_all),
     ("IDirectSound3DListener::GetDistanceFactor", 2, l_get_distance_factor),
     ("IDirectSound3DListener::GetDopplerFactor", 2, l_get_doppler_factor),

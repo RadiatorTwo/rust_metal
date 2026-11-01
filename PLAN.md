@@ -238,6 +238,9 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
       - mimalloc as the global allocator (the D3D worker frees what the game's thread
         allocates for every recorded call): A/B 3 rounds 248-250 -> 256-259 fps, imports per
         picture without a tick 0.71 -> 0.60 ms.
+      - DirectSound's CommitDeferredSettings on a thread of its own (`dsound::committer`; a
+        listener's Release waits for its commit): A/B 255-257 -> 257-260 fps, logic per tick
+        3.54 -> 3.38 ms. To be confirmed by ear: 3D sound positions in a mission.
       Found on the way: a device loss in a mission (TestCooperativeLevel lost, not scripted)
       was followed by a null read in 0x47a6b0 (from 0x47a07a): to be looked at. 0x47a6b0 is
       the game's IDirect3DVertexBuffer9::Lock call on a null buffer (released by
