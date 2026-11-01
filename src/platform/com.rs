@@ -14,6 +14,7 @@ use super::{Import, alloc, com_new, free, lock, mem};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A guest buffer of `size` bytes.
 #[derive(Clone, Copy)]
@@ -36,6 +37,10 @@ struct Table {
 }
 
 static TABLE: Mutex<Option<Table>> = Mutex::new(None);
+
+/// The host pointers of the first `HOSTS.len()` table entries (0 for none), for `host` without
+/// `TABLE`'s lock: it runs at every COM call, ~1 million a second in a mission.
+static HOSTS: [AtomicUsize; 1 << 16] = [const { AtomicUsize::new(0) }; 1 << 16];
 
 fn with<T>(f: impl FnOnce(&mut Table) -> T) -> T {
     f(lock(&TABLE).get_or_insert_with(Table::default))
@@ -67,6 +72,9 @@ pub fn wrap(methods: &'static [Import], host: *mut c_void) -> u32 {
             }
         };
         t.by_host.insert(key, i);
+        if let Some(h) = HOSTS.get(i as usize) {
+            h.store(key, Ordering::Release);
+        }
         mem().wr32(guest + 4, i);
         guest
     })
@@ -78,6 +86,10 @@ fn index(this: u32) -> usize {
 
 /// The host interface pointer behind a guest object.
 pub fn host(this: u32) -> *mut c_void {
+    let i = index(this);
+    if let Some(h) = HOSTS.get(i).map(|h| h.load(Ordering::Acquire)).filter(|&h| h != 0) {
+        return h as *mut c_void;
+    }
     with(|t| t.entries[index(this)].as_ref().expect("COM call on a released object").host as *mut c_void)
 }
 
@@ -90,6 +102,9 @@ pub fn release(this: u32, host_count: u32) {
     let i = index(this);
     let e = with(|t| {
         let e = t.entries[i].take().expect("COM object released twice");
+        if let Some(h) = HOSTS.get(i) {
+            h.store(0, Ordering::Release);
+        }
         t.by_host.remove(&e.host);
         t.vacant.push(i as u32);
         e

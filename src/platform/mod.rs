@@ -42,7 +42,7 @@ use crate::rt::{self, Cpu, EAX, ESP, Event, Memory};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 
 // guest address space
@@ -269,13 +269,23 @@ struct Thunk {
     f: Option<ImpFn>,
     /// not implemented: returns 0, and its first call is logged
     stub: bool,
-    /// a Direct3D method that is recorded for the worker thread (`d3d9::queue`): it keeps the turn
-    queued: bool,
-    /// another Direct3D method: waits for the worker first
-    d3d: bool,
 }
 
 static THUNKS: Mutex<Vec<Thunk>> = Mutex::new(Vec::new());
+
+/// What an import call needs of its thunk, read without `THUNKS`'s lock (~1 million import
+/// calls a second in a mission): the implementation (0 for none) and `META_*` with the
+/// number of stack arguments in the low byte. Set once in `thunk_add`, never changed.
+static THUNK_FN: [AtomicUsize; THUNK_N as usize] = [const { AtomicUsize::new(0) }; THUNK_N as usize];
+static THUNK_META: [AtomicU32; THUNK_N as usize] = [const { AtomicU32::new(0) }; THUNK_N as usize];
+/// not implemented: returns 0, and its first call is logged
+const META_STUB: u32 = 1 << 8;
+/// a Direct3D method that is recorded for the worker thread (`d3d9::queue`): it keeps the turn
+const META_QUEUED: u32 = 1 << 9;
+/// another Direct3D method: waits for the worker first
+const META_D3D: u32 = 1 << 10;
+/// a COM method (its result is traced with `GUNMETAL_TRACE_API`)
+const META_METHOD: u32 = 1 << 11;
 
 /// The name of thunk `k` (for the profiler).
 pub fn thunk_name(k: usize) -> String {
@@ -287,12 +297,20 @@ pub fn thunk_index(a: u32) -> Option<usize> {
     (THUNK_LO..THUNK_LO + 4 * THUNK_N).contains(&a).then(|| ((a - THUNK_LO) / 4) as usize)
 }
 
-fn thunk_add(name: String, nargs: i32, f: Option<ImpFn>) -> u32 {
+fn thunk_add(name: String, nargs: i32, f: Option<ImpFn>, stub: bool) -> u32 {
     let mut t = lock(&THUNKS);
     assert!((t.len() as u32) < THUNK_N, "out of thunks");
     let (queued, d3d) = (d3d9::queue::queued_method(&name), name.starts_with("IDirect3D"));
-    t.push(Thunk { name, nargs, stub: false, f, queued, d3d });
-    THUNK_LO + 4 * (t.len() as u32 - 1)
+    let k = t.len();
+    let meta = nargs.clamp(0, 255) as u32
+        | if stub { META_STUB } else { 0 }
+        | if queued { META_QUEUED } else { 0 }
+        | if d3d { META_D3D } else { 0 }
+        | if name.contains("::") { META_METHOD } else { 0 };
+    THUNK_META[k].store(meta, Ordering::Relaxed);
+    THUNK_FN[k].store(f.map_or(0, |f| f as usize), Ordering::Release);
+    t.push(Thunk { name, nargs, stub, f });
+    THUNK_LO + 4 * k as u32
 }
 
 fn ret0(_: &mut Cpu) -> u32 {
@@ -302,9 +320,7 @@ fn ret0(_: &mut Cpu) -> u32 {
 /// A guest address for a function without an implementation yet: it returns 0, and its first
 /// call is logged by name.
 pub fn thunk_not_implemented(name: &str, nargs: i32) -> u32 {
-    let a = thunk_add(name.to_string(), nargs, Some(ret0));
-    lock(&THUNKS).last_mut().unwrap().stub = true;
-    a
+    thunk_add(name.to_string(), nargs, Some(ret0), true)
 }
 
 /// Calls of `method_not_implemented` (never runs: `com_new` binds it as `thunk_not_implemented`).
@@ -320,7 +336,7 @@ pub fn method_not_implemented(_: &mut Cpu) -> u32 {
 
 /// A guest address that runs `f` when called.
 pub fn thunk(name: &str, nargs: i32, f: ImpFn) -> u32 {
-    thunk_add(name.to_string(), nargs, Some(f))
+    thunk_add(name.to_string(), nargs, Some(f), false)
 }
 
 // ---- COM objects --------------------------------------------------------------------------------
@@ -500,7 +516,9 @@ fn on_event(c: &mut Cpu, e: Event) {
     match e {
         Event::Foreign(a) if (THUNK_LO..THUNK_LO + 4 * THUNK_N).contains(&a) => {
             let k = ((a - THUNK_LO) / 4) as usize;
-            let (f, nargs, method, queued, d3d) = {
+            let fp = THUNK_FN.get(k).map_or(0, |f| f.load(Ordering::Acquire));
+            let meta = THUNK_META.get(k).map_or(0, |m| m.load(Ordering::Relaxed));
+            if fp == 0 || meta & META_STUB != 0 || trace_api() {
                 let t = lock(&THUNKS);
                 let Some(th) = t.get(k) else { fatal(c, &format!("call to unused thunk {a:#x}")) };
                 if trace_api() {
@@ -508,18 +526,21 @@ fn on_event(c: &mut Cpu, e: Event) {
                     log!("api {}({}) from {:#x}", th.name, args.join(", "), mem().rd32(c.r[ESP]));
                 }
                 match th.f {
-                    Some(f) => {
+                    Some(_) => {
                         if th.stub {
                             static SEEN: Mutex<BTreeMap<String, ()>> = Mutex::new(BTreeMap::new());
                             if lock(&SEEN).insert(th.name.clone(), ()).is_none() {
                                 log!("warn: {} is not implemented (returns 0)", th.name);
                             }
                         }
-                        (f, th.nargs, th.name.contains("::"), th.queued, th.d3d)
                     }
                     None => fatal(c, &format!("import {} is not implemented yet", th.name)),
                 }
-            };
+            }
+            // SAFETY: `thunk_add` stored an `ImpFn` there
+            let f: ImpFn = unsafe { std::mem::transmute::<usize, ImpFn>(fp) };
+            let (nargs, method, queued, d3d) =
+                (meta & 0xff, meta & META_METHOD != 0, meta & META_QUEUED != 0, meta & META_D3D != 0);
             LAST_CALL.store(mem().rd32(c.r[ESP]), std::sync::atomic::Ordering::Relaxed);
             crash::note_import(c, k);
             if frames::on() {
@@ -554,7 +575,7 @@ fn on_event(c: &mut Cpu, e: Event) {
                 prof_add(k, t1 - t0, t1.elapsed());
             }
             c.r[EAX] = r;
-            c.r[ESP] += 4 + 4 * nargs.max(0) as u32;
+            c.r[ESP] += 4 + 4 * nargs;
         }
         Event::Foreign(a) => fatal(c, &format!("call to unknown address {a:#x}")),
         Event::Trap(a, 0) => fatal(c, &format!("division by zero at {a:#x}")),
@@ -940,7 +961,7 @@ fn load_image(img: &Image) {
             Some(&(name, n, f)) => thunk(name, n, f),
             None => {
                 missing.push(i.name.clone());
-                thunk_add(format!("{}!{}", i.dll, i.name), 0, None)
+                thunk_add(format!("{}!{}", i.dll, i.name), 0, None, false)
             }
         };
         m.wr32(i.iat, a);

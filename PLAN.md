@@ -231,6 +231,10 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
         hook by far): A/B 3 rounds 236-239 -> 241-246 fps, guest time per picture without a
         tick 2.95 -> 2.87 ms. Tick fingerprints: camera, player and game time identical; the
         rest differs as much as between two runs of the old build.
+      - Import calls without a lock: the thunk's implementation and flags (`THUNK_FN`,
+        `THUNK_META`) and a COM object's host pointer (`com::HOSTS`) are read lock-free:
+        A/B 3 rounds 242-245 -> 243-250 fps (~1 %, partly noise). Left on the import path:
+        the D3D state cache's lock, the queue's batch lock and a Box per recorded call.
       Found on the way: a device loss in a mission (TestCooperativeLevel lost, not scripted)
       was followed by a null read in 0x47a6b0 (from 0x47a07a): to be looked at. 0x47a6b0 is
       the game's IDirect3DVertexBuffer9::Lock call on a null buffer (released by
