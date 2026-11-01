@@ -20,6 +20,16 @@ fn every() -> Duration {
     Duration::from_millis(*MS.get_or_init(|| std::env::var("GUNMETAL_SHOT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(500)))
 }
 
+/// `GUNMETAL_SHOT_WINDOW=<from>-<to>`: pictures only between these ms since start.
+fn window() -> Option<(u64, u64)> {
+    static W: OnceLock<Option<(u64, u64)>> = OnceLock::new();
+    *W.get_or_init(|| {
+        let v = std::env::var("GUNMETAL_SHOT_WINDOW").ok()?;
+        let (a, b) = v.split_once('-')?;
+        Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+    })
+}
+
 static LAST: Mutex<Option<Instant>> = Mutex::new(None);
 
 /// A picture asked for once (`request`).
@@ -36,6 +46,12 @@ pub fn before_present(dev: *mut c_void, back: Option<*mut c_void>) {
     let requested = lock(&REQUESTED).take();
     let Some(path) = requested.as_ref().or(path()) else { return };
     if requested.is_none() {
+        if let Some((from, to)) = window() {
+            let t = kernel32::start_time().elapsed().as_millis() as u64;
+            if t < from || t > to {
+                return;
+            }
+        }
         let mut last = lock(&LAST);
         if last.is_some_and(|t| t.elapsed() < every()) {
             return;

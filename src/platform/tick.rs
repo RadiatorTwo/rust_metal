@@ -345,8 +345,28 @@ fn lists_merge(lists: &[(u32, u8, [u8; LLIST_HEAD])]) {
     }
 }
 
+// ---- the router's new objects ----------------------------------------------------------------
+
+/// Router vt+0x50 (thiscall, no arguments): takes the objects queued on its list +0x906c (by
+/// the router's add, vt+0x14 0x506830, from the tick) and sorts them into its containers
+/// (vt+0x2c, +0x9088 ...), which the drawing walks. The world's drawing 0x4130a0 calls it at
+/// its end (0x4139c8), after the tick in the original. While a tick runs, the tick queues on
+/// the same list (seen: both changed it, then a call through a freed object); put off to
+/// the join instead, the objects were missing from the pictures in between (all but the
+/// player and the ground flickered). So the drawing waits for the tick here: the merged
+/// world, then the call, in the original's order.
+pub const ROUTER_DRAIN: u32 = 0x503c80;
+
+fn router_drain(c: &mut Cpu) {
+    if !world::is_tick() {
+        join();
+    }
+    call_original(c, ROUTER_DRAIN);
+}
+
 /// Hooks while the tick thread is on (`platform::hooks`).
-pub const HOOKS: [(u32, crate::rt::Hook); 6] = [
+pub const HOOKS: [(u32, crate::rt::Hook); 7] = [
+    (ROUTER_DRAIN, router_drain),
     (POOL_ALLOC, pool_alloc),
     (POOL_FREE, pool_free),
     (LLIST_OPS[0], |c| llist_op(c, 0)),

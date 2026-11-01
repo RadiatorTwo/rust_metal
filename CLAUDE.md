@@ -311,7 +311,7 @@ their page, `rt::MAP_OFF`), `GUNMETAL_WORLD_VERIFY=1` (with it: every
 type, malloc/free and `_rand` in and outside ticks with callers, the router's per-frame method,
 GetWriteWatch costs and the committed size; either TICK variable adds `ticks::HOOKS`, part of the
 cache key), `GUNMETAL_SHOT=shot/x.png` (the back buffer before Present, at most every
-`GUNMETAL_SHOT_MS`, 500; `{t}` in the name: ms since start; `shot/` is git-ignored: game imagery is
+`GUNMETAL_SHOT_MS`, 500, only between `GUNMETAL_SHOT_WINDOW=<from>-<to>` ms if set; `{t}` in the name: ms since start; `shot/` is git-ignored: game imagery is
 never committed).
 
 Tools: `cargo run --release --example functions -- game_files [--gaps]` (find + compile,

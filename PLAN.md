@@ -347,9 +347,28 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
         250 joins waited) against 5.6 in `serial`; join 509 pages copied, 361 merged, ~47
         bytes both changed per tick (renderer state 0x6bc374..0x6bc3b2, camera globals
         0x72a7d8..). `serial` still fine.
-      - Next: the bytes both changed (what the drawing and the tick share; the tick's are
-        kept now), fingerprints of `1` against off, longer runs (bench script, cold starts,
-        device loss, exit mid-tick).
+        Third rule (uncommitted, 2026-11-01 evening): router vt+0x50 0x503c80 (sorts the
+        objects queued on the router's list +0x906c, by the tick's add 0x506830, into its
+        containers; called at the end of the world's drawing 0x4130a0, 0x4139c8): both
+        changed that list (a fault through a freed object in 1 of 3 bench runs). Putting the
+        call off to the join made every object but the player and the ground flicker (missing
+        from the pictures in between); now the drawing joins there and then calls the
+        original (`tick::router_drain`). Checked with pictures 1.5 s, every frame: objects in
+        every picture. 2 of 2 `check` bench runs clean before this rule's last form; the 3
+        runs with it were stopped (the user). `GUNMETAL_SHOT_WINDOW=<from>-<to>` ms added.
+        The "hangs in the menu" of some runs were the script: the briefing appears ~46.7 s
+        and sometimes later than the 48 s Enter; `.superpowers/bench_game/bench2.txt` has it
+        at 51 s.
+      - 3 `check` runs with bench2.txt clean (2026-11-01): per tick fork ~1.0 ms (~2100 pages
+        synced), waited 2-4 ms (now nearly every join: the drawing joins early, at 0x503c80),
+        join ~0.22 ms (~815 copied, ~75 merged, ~45 bytes both changed: 0x6bc2f4..0x6bc3b0
+        nearly all, 0x6c16e8.., 0x6f9996..). Fork + join ~1.2 ms, above the 0.7 ms target.
+      - `GUNMETAL_FRAMES`, off against `1`, interleaved, 3 rounds: fps 219/198/201 against
+        217/195/205 (no gain); the main thread's time per tick 3.97-4.61 -> 1.07-1.30 ms, but
+        a tick comes every ~8 pictures and the marking costs 2-6 %: they cancel out. To gain:
+        fork cheaper (fewer pages synced) and a later join (the drawing's router drain).
+      - Next: the bytes both changed (the tick's kept now), fingerprints of
+        `1` against off, longer runs (cold starts, device loss, exit mid-tick).
         Left for later: the sync on the tick thread between ticks (needs marks written after
         the store, host `slice` writes re-marked after imports), steps 5-7.
       Step 0 of `docs/superpowers/plans/2026-10-31-tick-thread.md` (2026-10-31, `ticks.rs`,
