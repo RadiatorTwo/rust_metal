@@ -615,6 +615,9 @@ fn report_fault(kind: &str, a: usize, pc: usize) {
             func.map_or("?".into(), crate::image::named),
             LAST_CALL.load(std::sync::atomic::Ordering::Relaxed)
         );
+        for line in crash::last_import_stack() {
+            log!("{line}");
+        }
     } else {
         log!("fatal: host memory {kind} at {a:#x} (code {pc:#x})");
     }

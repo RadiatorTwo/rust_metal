@@ -227,7 +227,14 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
         thunk lookup, recording with an allocation per call). To be confirmed by hand: Alt+Enter
         both ways, the picture's black bars, Alt+Tab, Win+L in a mission.
       Found on the way: a device loss in a mission (TestCooperativeLevel lost, not scripted)
-      was followed by a null read in 0x47a6b0 (from 0x47a07a): to be looked at.
+      was followed by a null read in 0x47a6b0 (from 0x47a07a): to be looked at. 0x47a6b0 is
+      the game's IDirect3DVertexBuffer9::Lock call on a null buffer (released by
+      d3d_lost_release 0x46f190). Seen twice with a real loss (UAC); a simulated loss
+      (`lose*ms`, also with blur/focus during it) goes through Reset fine, and the next UAC
+      try of the user's did not crash: a race. Guest faults now log the thread's stack as at
+      its last import (`crash::last_import_stack`). Also seen twice: a null read at a mission
+      start in the first run after a rebuild (freshly compiled code, not compiled.bin; last
+      import IDirect3DSurface9::GetContainer from 0x4712b0).
 - [ ] Frame rate: even frame times (docs/superpowers/plans/2026-10-30-tick-decoupling.md,
       design (a) chosen: the tick on a second thread; on hold, see above). Baseline 2026-10-31, corrected
       (`GUNMETAL_FRAMES` without page probes, 3 cold runs of the profile script, mission 1,

@@ -266,6 +266,17 @@ pub fn shutdown(c: &mut Cpu) {
     call_original(c, SHUTDOWN);
 }
 
+/// For a fault in guest code: the faulting thread's stack as it was at its last import call
+/// (the registers of the faulting moment are not at hand; the outer frames are shared).
+pub fn last_import_stack() -> Vec<String> {
+    let Some(s) = slot() else { return vec!["  (an unregistered host thread)".into()] };
+    let k = s.import.load(Ordering::Relaxed);
+    let import = if k == 0 { "none".to_string() } else { thunk_name(k as usize - 1) };
+    let mut out = vec![format!("  {}: last import {import}, returning to {}", thread_line(s), function_of(s.ret.load(Ordering::Relaxed)))];
+    out.extend(stack_report(s.esp.load(Ordering::Relaxed), s.ebp.load(Ordering::Relaxed), s.tib.load(Ordering::Relaxed)));
+    out
+}
+
 /// __amsg_exit(code): the report, then the original (its message box and exit(255)).
 pub fn amsg_exit(c: &mut Cpu) {
     let m = mem();
