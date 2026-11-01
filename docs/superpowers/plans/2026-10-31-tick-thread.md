@@ -240,6 +240,20 @@ the thread ends). Mission: ~2200 pages written per 2 s, a sync of them ~1.1 ms.
 
 ### Step 2: thread roles and imports per role (still off)
 
+Done 2026-11-01 (`world.rs`, `mod.rs`, `kernel32.rs`): `world::Role` per thread (Main set in
+`run_game`); the tick thread takes no turn (`turn_take`/`turn_give` return at once for it);
+its imports go through `tick_import`: `world::tick_rule` says Live (memory, critical sections,
+TLS, last error, interlocked, time, DirectSound, DirectInput), Record (the device's SetLight,
+SetTransform, SetMaterial with a copy of their data, LightEnable, SetRenderState; D3D_OK
+returned, `replay_calls` makes them on the main thread from a scratch frame) or Unexpected
+(called live, logged once). The heap is mapped through the game's memory (twins with it); a
+new block is zeroed in A, B and C; frees wait in `world::FREES` while a tick runs. Thread id
+and TLS: `kernel32::pose_as` (TlsSetValue in a tick logged). Changed from 1.5: one table of
+critical sections for all worlds: the tick thread has the main thread's id, so it enters
+what the main thread holds and both leave their own entries; it waits only for other guest
+threads, which keeps A's data consistent for them. Left for step 3: last error copied at the
+fork, `fps::IN_TICK` per thread, the tick thread in crash reports.
+
 - [ ] `ROLE`; the worker posing as the main thread (thread id, TLS, last error); critical
       sections per world; shared allocator with zero-fill in all worlds and queued frees; D3D
       recorder and replayer.

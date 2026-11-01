@@ -66,6 +66,11 @@ thread_local! {
     static WORLD: std::cell::Cell<Option<&'static Memory>> = const { std::cell::Cell::new(None) };
 }
 
+/// The game's memory (world A), on any thread.
+pub fn game_mem() -> &'static Memory {
+    MEM.get().expect("guest memory not set up")
+}
+
 /// Guest memory: the game's, or on the tick thread its own copy (`set_world`).
 pub fn mem() -> &'static Memory {
     WORLD.with(|w| w.get()).unwrap_or_else(|| MEM.get().expect("guest memory not set up"))
@@ -210,7 +215,8 @@ impl Heap {
         self.top = a + size;
         if self.top > self.mapped {
             let hi = (self.top + 0xf_ffff) & !0xf_ffff;
-            mem().map(self.mapped, hi);
+            // the game's memory: maps the tick thread's worlds with it
+            game_mem().map(self.mapped, hi);
             self.mapped = hi;
         }
         self.used.insert(a, size);
@@ -230,13 +236,24 @@ pub fn alloc(size: u32) -> u32 {
 pub fn alloc_aligned(size: u32, align: u32) -> u32 {
     let p = lock(&HEAP).alloc(size, align);
     if p != 0 {
-        mem().slice(p, size as usize).fill(0);
+        match world::worlds() {
+            // one heap for all worlds: a new block is new in each
+            Some(w) => {
+                for m in [w.a, w.b, w.c] {
+                    m.slice(p, size as usize).fill(0);
+                }
+            }
+            None => mem().slice(p, size as usize).fill(0),
+        }
     }
     p
 }
 
 /// Free a block from `alloc`; anything else is ignored (returns false).
 pub fn free(p: u32) -> bool {
+    if world::defer_free(p) {
+        return lock(&HEAP).used.contains_key(&p);
+    }
     let mut h = lock(&HEAP);
     match h.used.remove(&p) {
         Some(s) => {
@@ -403,7 +420,8 @@ thread_local! {
 }
 
 fn turn_take() {
-    if HELD.get() {
+    // the tick thread works in its own memory (`world`)
+    if HELD.get() || world::is_tick() {
         return;
     }
     let mut t = lock(&TURN.tickets);
@@ -424,7 +442,7 @@ fn turn_take() {
 }
 
 fn turn_give() {
-    if EXCLUSIVE.load(Ordering::Relaxed) {
+    if EXCLUSIVE.load(Ordering::Relaxed) || world::is_tick() {
         return;
     }
     HELD.set(false);
@@ -553,6 +571,10 @@ fn on_event(c: &mut Cpu, e: Event) {
             let f: ImpFn = unsafe { std::mem::transmute::<usize, ImpFn>(fp) };
             let (nargs, method, queued, d3d) =
                 (meta & 0xff, meta & META_METHOD != 0, meta & META_QUEUED != 0, meta & META_D3D != 0);
+            if world::is_tick() {
+                tick_import(c, k, f, nargs);
+                return;
+            }
             LAST_CALL.store(mem().rd32(c.r[ESP]), std::sync::atomic::Ordering::Relaxed);
             crash::note_import(c, k);
             if frames::on() {
@@ -599,6 +621,68 @@ fn on_event(c: &mut Cpu, e: Event) {
             let i = iced_x86::Decoder::with_ip(32, &bytes, a as u64, iced_x86::DecoderOptions::NONE).decode();
             fatal(c, &format!("unsupported instruction at {a:#x}: {i} (not lifted)"))
         }
+    }
+}
+
+/// An import called on the tick thread (`world::tick_rule`): no turn, Direct3D setters
+/// recorded for the join.
+fn tick_import(c: &mut Cpu, k: usize, f: ImpFn, nargs: u32) {
+    use world::TickRule;
+    static RULES: [std::sync::atomic::AtomicU8; THUNK_N as usize] = [const { std::sync::atomic::AtomicU8::new(0) }; THUNK_N as usize];
+    let rule = match RULES[k].load(Ordering::Relaxed) {
+        0 => {
+            let name = thunk_name(k);
+            let r = world::tick_rule(&name);
+            if r == TickRule::Unexpected {
+                log!("world: {name} called in a tick (not expected; called as usual)");
+            }
+            let code = match r {
+                TickRule::Live => 1,
+                TickRule::Unexpected => 2,
+                TickRule::Record(..) => 3,
+            };
+            RULES[k].store(code, Ordering::Relaxed);
+            r
+        }
+        3 => world::tick_rule(&thunk_name(k)),
+        2 => TickRule::Unexpected,
+        _ => TickRule::Live,
+    };
+    let r = if let TickRule::Record(..) = rule {
+        world::record(k, (0..nargs).map(|n| arg(c, n)).collect(), rule, mem());
+        0 // D3D_OK
+    } else {
+        f(c)
+    };
+    c.r[EAX] = r;
+    c.r[ESP] += 4 + 4 * nargs;
+}
+
+/// Make the Direct3D calls recorded in a tick (`world::take_calls`) on this thread (the main
+/// thread, at the join), with their arguments and data in a scratch frame of guest memory.
+pub fn replay_calls(calls: &[world::Call]) {
+    static FRAME: OnceLock<u32> = OnceLock::new();
+    let frame = *FRAME.get_or_init(|| alloc(0x400));
+    let m = game_mem();
+    for call in calls {
+        let fp = THUNK_FN[call.k].load(Ordering::Acquire);
+        if fp == 0 {
+            continue;
+        }
+        // SAFETY: `thunk_add` stored an `ImpFn` there
+        let f: ImpFn = unsafe { std::mem::transmute::<usize, ImpFn>(fp) };
+        // [frame] return address, [frame + 4..] arguments, data at frame + 0x100
+        m.wr32(frame, RET_MAGIC);
+        for (n, &a) in call.args.iter().enumerate() {
+            m.wr32(frame + 4 + 4 * n as u32, a);
+        }
+        if let Some((at, d)) = &call.data {
+            m.slice(frame + 0x100, d.len()).copy_from_slice(d);
+            m.wr32(frame + 4 + 4 * *at as u32, frame + 0x100);
+        }
+        let mut c = Cpu::new(m);
+        c.r[ESP] = frame;
+        f(&mut c);
     }
 }
 
@@ -1014,6 +1098,7 @@ pub fn heap_top() -> u32 {
 pub fn run_game(game: &crate::game::Game, game_dir: PathBuf) -> u32 {
     let _ = GAME_DIR.set(game_dir);
     let m = init_memory();
+    world::set_role(world::Role::Main);
     if rt::marking() {
         // the tick thread's copies of guest memory, mapped with it from now on
         world::setup(m);

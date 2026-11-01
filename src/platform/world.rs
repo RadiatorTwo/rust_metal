@@ -53,6 +53,147 @@ pub fn mode(dir: &Path) -> Mode {
     })
 }
 
+// ---- thread roles --------------------------------------------------------------------------
+
+/// What a host thread is to the worlds: the game's main thread, the tick thread (in B, posing
+/// as the main thread), or any other (guest threads, host workers).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Role {
+    Other,
+    Main,
+    Tick,
+}
+
+thread_local! {
+    static ROLE: std::cell::Cell<Role> = const { std::cell::Cell::new(Role::Other) };
+}
+
+pub fn role() -> Role {
+    ROLE.with(|r| r.get())
+}
+
+pub fn set_role(r: Role) {
+    ROLE.with(|c| c.set(r));
+}
+
+/// On the tick thread: it takes no turn, imports follow `tick_rule`.
+pub fn is_tick() -> bool {
+    role() == Role::Tick
+}
+
+// ---- frees while a tick runs -------------------------------------------------------------------
+
+/// Frees held back while a tick runs: the block may still be in use in the other world, and
+/// the heap (one for all worlds) must not hand it out again before the join.
+pub struct FreeQueue {
+    running: std::sync::atomic::AtomicBool,
+    list: std::sync::Mutex<Vec<u32>>,
+}
+
+impl FreeQueue {
+    pub const fn new() -> FreeQueue {
+        FreeQueue { running: std::sync::atomic::AtomicBool::new(false), list: std::sync::Mutex::new(Vec::new()) }
+    }
+    /// Whether a tick runs in B (from its fork to its join).
+    pub fn running(&self) -> bool {
+        self.running.load(Ordering::Acquire)
+    }
+    pub fn set_running(&self, on: bool) {
+        self.running.store(on, Ordering::Release);
+    }
+    /// Queue `p` while a tick runs (true), else leave it to the caller (false).
+    pub fn defer(&self, p: u32) -> bool {
+        if !self.running() {
+            return false;
+        }
+        self.list.lock().unwrap_or_else(|e| e.into_inner()).push(p);
+        true
+    }
+    /// The frees queued while the tick ran, to be done now.
+    pub fn take(&self) -> Vec<u32> {
+        std::mem::take(&mut *self.list.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+}
+
+impl Default for FreeQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The heap's queue (`platform::free`).
+pub static FREES: FreeQueue = FreeQueue::new();
+
+pub fn tick_running() -> bool {
+    FREES.running()
+}
+
+pub fn defer_free(p: u32) -> bool {
+    FREES.defer(p)
+}
+
+// ---- imports on the tick thread ----------------------------------------------------------------
+
+/// What an import called on the tick thread does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TickRule {
+    /// called as on any thread (memory, critical sections, time, sound, input)
+    Live,
+    /// a Direct3D setter: recorded with its arguments (and the bytes argument `.0` points at,
+    /// `.1` of them, when `.1` is not 0), D3D_OK returned; replayed on the main thread at the
+    /// join (`take_calls`)
+    Record(usize, usize),
+    /// not expected in a tick: called live, logged once
+    Unexpected,
+}
+
+/// The rule for an import of this name (`Dll!Name` or `Interface::Method` as thunks are named).
+pub fn tick_rule(name: &str) -> TickRule {
+    if let Some(m) = name.strip_prefix("IDirect3DDevice9::") {
+        return match m {
+            "SetLight" | "SetTransform" => TickRule::Record(2, if m == "SetLight" { 104 } else { 64 }),
+            "SetMaterial" => TickRule::Record(1, 68),
+            "LightEnable" | "SetRenderState" => TickRule::Record(0, 0),
+            _ => TickRule::Unexpected,
+        };
+    }
+    if name.starts_with("IDirectSound") || name.starts_with("IDirectInput") {
+        return TickRule::Live;
+    }
+    const LIVE: &[&str] = &[
+        "HeapAlloc", "HeapFree", "HeapReAlloc", "HeapSize", "GlobalAlloc", "GlobalFree", "VirtualAlloc", "VirtualFree", "EnterCriticalSection",
+        "LeaveCriticalSection", "InitializeCriticalSection", "DeleteCriticalSection", "TlsGetValue", "GetLastError", "SetLastError",
+        "InterlockedIncrement", "InterlockedDecrement", "InterlockedExchange", "InterlockedCompareExchange", "GetCurrentThreadId",
+        "GetCurrentThread", "timeGetTime", "GetTickCount", "QueryPerformanceCounter", "QueryPerformanceFrequency", "OutputDebugStringA",
+    ];
+    if LIVE.contains(&name) { TickRule::Live } else { TickRule::Unexpected }
+}
+
+/// A Direct3D call recorded on the tick thread.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Call {
+    /// the thunk
+    pub k: usize,
+    /// its stack arguments (`this` first)
+    pub args: Vec<u32>,
+    /// the argument that points at data, and a copy of the data
+    pub data: Option<(usize, Vec<u8>)>,
+}
+
+static CALLS: std::sync::Mutex<Vec<Call>> = std::sync::Mutex::new(Vec::new());
+
+/// Record an import call of thunk `k` with `nargs` stack arguments by `rule` (a `Record`).
+pub fn record(k: usize, args: Vec<u32>, rule: TickRule, mem: &Memory) {
+    let TickRule::Record(at, n) = rule else { return };
+    let data = (n != 0 && args.get(at).is_some_and(|&p| p != 0)).then(|| (at, mem.bytes(args[at], n).to_vec()));
+    CALLS.lock().unwrap_or_else(|e| e.into_inner()).push(Call { k, args, data });
+}
+
+/// The calls recorded in the tick, in order (for the replay at the join).
+pub fn take_calls() -> Vec<Call> {
+    std::mem::take(&mut *CALLS.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
 /// The three memories.
 pub struct Worlds {
     pub a: &'static Memory,
@@ -404,6 +545,58 @@ mod tests {
         p.clear();
         marked(w.a, &r, false, &mut p);
         assert_eq!(p, vec![0x103]);
+    }
+
+    #[test]
+    fn frees_wait_while_a_tick_runs() {
+        let q = FreeQueue::new();
+        assert!(!q.defer(0x100));
+        q.set_running(true);
+        assert!(q.defer(0x100) && q.defer(0x200));
+        q.set_running(false);
+        assert_eq!(q.take(), vec![0x100, 0x200]);
+        assert!(q.take().is_empty());
+    }
+
+    #[test]
+    fn tick_rules() {
+        assert_eq!(tick_rule("IDirect3DDevice9::SetLight"), TickRule::Record(2, 104));
+        assert_eq!(tick_rule("IDirect3DDevice9::SetRenderState"), TickRule::Record(0, 0));
+        assert_eq!(tick_rule("IDirect3DDevice9::DrawPrimitive"), TickRule::Unexpected);
+        assert_eq!(tick_rule("IDirectSound3DBuffer::SetPosition"), TickRule::Live);
+        assert_eq!(tick_rule("HeapAlloc"), TickRule::Live);
+        assert_eq!(tick_rule("CreateFileA"), TickRule::Unexpected);
+    }
+
+    static SEEN: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+    fn fake_set_light(c: &mut crate::rt::Cpu) -> u32 {
+        let m = crate::platform::mem();
+        let (this, idx, p) = (crate::platform::arg(c, 0), crate::platform::arg(c, 1), crate::platform::arg(c, 2));
+        let mut v = vec![this, idx];
+        v.extend((0..26).map(|k| m.rd32(p + 4 * k)));
+        *SEEN.lock().unwrap() = v;
+        0
+    }
+
+    #[test]
+    fn a_recorded_set_light_replays_the_same_bytes() {
+        let m = crate::platform::init_memory();
+        let k = crate::platform::thunk_index(crate::platform::thunk("IDirect3DDevice9::SetLight", 3, fake_set_light)).unwrap();
+        let light = crate::platform::alloc(104);
+        for j in 0..26 {
+            m.wr32(light + 4 * j, 0x100 + j);
+        }
+        let rule = tick_rule("IDirect3DDevice9::SetLight");
+        record(k, vec![0xabc, 3, light], rule, m);
+        // the light changes after the call: the copy counts
+        m.wr32(light, 0);
+        let calls: Vec<Call> = take_calls().into_iter().filter(|c| c.k == k).collect();
+        assert_eq!(calls.len(), 1);
+        crate::platform::replay_calls(&calls);
+        let seen = SEEN.lock().unwrap().clone();
+        assert_eq!(seen[..2], [0xabc, 3]);
+        assert_eq!(seen[2..], (0..26).map(|j| 0x100 + j).collect::<Vec<u32>>()[..]);
     }
 
     #[test]

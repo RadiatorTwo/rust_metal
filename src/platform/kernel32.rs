@@ -136,13 +136,31 @@ fn wait_signal(g: MutexGuard<'static, Objects>, until: Option<Instant>) -> (Mute
 
 static NEXT_TID: AtomicU32 = AtomicU32::new(1);
 thread_local! {
-    static TID: u32 = NEXT_TID.fetch_add(1, Ordering::Relaxed);
+    /// 0 until the thread first asks (or `pose_as` sets another's)
+    static TID: Cell<u32> = const { Cell::new(0) };
     static TLS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
     static EXIT_CODE: Cell<u32> = const { Cell::new(0) };
 }
 
 pub fn thread_id() -> u32 {
-    TID.with(|t| *t)
+    TID.with(|t| {
+        if t.get() == 0 {
+            t.set(NEXT_TID.fetch_add(1, Ordering::Relaxed));
+        }
+        t.get()
+    })
+}
+
+/// This host thread is guest thread `tid` from now on, with `tls` as its TLS slots (the tick
+/// thread as the main thread, `world`).
+pub fn pose_as(tid: u32, tls: Vec<u32>) {
+    TID.with(|t| t.set(tid));
+    TLS.with(|t| *t.borrow_mut() = tls);
+}
+
+/// This thread's TLS slots.
+pub fn tls_values() -> Vec<u32> {
+    TLS.with(|t| t.borrow().clone())
 }
 
 // ---- process ------------------------------------------------------------------------------------
@@ -596,6 +614,10 @@ fn tls_get_value(c: &mut Cpu) -> u32 {
 
 fn tls_set_value(c: &mut Cpu) -> u32 {
     let (k, v) = (arg(c, 0) as usize, arg(c, 1));
+    if super::world::is_tick() {
+        // its slots are a copy of the main thread's: this value stays in the tick
+        log!("world: TlsSetValue({k}, {v:#x}) in a tick: not seen by the main thread");
+    }
     TLS.with(|t| {
         let mut t = t.borrow_mut();
         if t.len() <= k {
@@ -1647,4 +1669,28 @@ fn exit_process_from_terminate(c: &mut Cpu) -> u32 {
     super::frames::finish();
     super::ticks::finish();
     std::process::exit(code as i32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_thread_can_pose_as_another() {
+        let (tid, tls) = std::thread::spawn(|| (thread_id(), {
+            TLS.with(|t| *t.borrow_mut() = vec![0x11, 0x22]);
+            tls_values()
+        }))
+        .join()
+        .unwrap();
+        let (seen_tid, seen) = std::thread::spawn(move || {
+            pose_as(tid, tls);
+            (thread_id(), tls_values())
+        })
+        .join()
+        .unwrap();
+        assert_eq!(seen_tid, tid);
+        assert_eq!(seen, vec![0x11, 0x22]);
+        assert_ne!(thread_id(), tid);
+    }
 }

@@ -304,8 +304,8 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
       that the tick writes too (object/node state, not only renderer data)
       Resumed 2026-11-01 (the user). Step 1 done: worlds A, B, C (`platform/world.rs`) with
       a page map written by generated stores instead of write watch (cost and checks in the
-      plan's step 1); off by default, no cost when off. Next: step 2 (thread roles, imports per
-      role).
+      plan's step 1); off by default, no cost when off. Step 2 done (thread roles, imports per
+      role, frees held back, D3D setters recorded and replayed). Next: step 3 (`serial`).
       Step 0 of `docs/superpowers/plans/2026-10-31-tick-thread.md` (2026-10-31, `ticks.rs`,
       `GUNMETAL_TICK_PROBE`, `GUNMETAL_TICK_PRINT`, tick-indexed `GUNMETAL_INPUT` items `t<N>:`;
       report `.superpowers/perf/task-tt0-report.md`; mission 1, 651 ticks, ~14 cold runs):
