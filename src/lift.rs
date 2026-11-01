@@ -35,6 +35,9 @@ pub struct Refs {
     /// program's statics move from run to run)
     pub poll: GlobalValue,
     pub guest_sig: SigRef,
+    /// The C runtime's `__ftol` when it is hooked (`platform::crt::ftol`): its calls are
+    /// done inline instead (`Lifter::ftol`), ~8000 a picture in a mission.
+    pub ftol: Option<u32>,
 }
 
 const TRAP_DIV0: i64 = 0;
@@ -778,7 +781,8 @@ impl<'a, 'f> Lifter<'a, 'f> {
     fn emit(&mut self, i: &Instruction) {
         // x87 values stay in variables only while nothing else can see `Cpu::st` or reach
         // the next instruction
-        if self.fcached > 0 && !(self.straight && unsupported(i).is_none() && x87::cacheable(i)) {
+        let ftol = self.refs.ftol.is_some() && i.flow_control() == FlowControl::Call && direct_target(i) == self.refs.ftol;
+        if self.fcached > 0 && !(self.straight && unsupported(i).is_none() && (x87::cacheable(i) || ftol)) {
             self.x87_flush();
         }
         let ends = match unsupported(i) {
@@ -815,6 +819,7 @@ impl<'a, 'f> Lifter<'a, 'f> {
                         let t = self.rel_target(i);
                         self.call_to(i, t, None);
                     }
+                    Some(t) if Some(t) == self.refs.ftol => self.ftol(),
                     Some(t) => {
                         let v = self.iconst(I32, t as i64);
                         self.call_to(i, v, Some(t));

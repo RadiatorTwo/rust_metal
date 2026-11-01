@@ -217,6 +217,20 @@ impl Lifter<'_, '_> {
         self.b.ins().select(is3, trunc, r)
     }
 
+    /// A call of `__ftol` (as `platform::crt::ftol`): ST(0) truncated to a 64-bit integer in
+    /// edx:eax, popped. The original's own stack use is below esp and its flags are read by
+    /// no caller (`discover::FlagCrossings`), so nothing else is left to do.
+    pub(super) fn ftol(&mut self) {
+        let v = self.st(0);
+        self.fpop();
+        let x = self.to_int(v, 8, true);
+        let lo = self.b.ins().ireduce(I32, x);
+        let hi = self.b.ins().ushr_imm_u(x, 32);
+        let hi = self.b.ins().ireduce(I32, hi);
+        self.set_reg(0, lo);
+        self.set_reg(2, hi);
+    }
+
     /// A double as a `size`-byte integer, rounded by the control word (`truncate` for
     /// fisttp); out of range or NaN gives the "integer indefinite" (the smallest integer).
     fn to_int(&mut self, v: Value, size: u32, truncate: bool) -> Value {

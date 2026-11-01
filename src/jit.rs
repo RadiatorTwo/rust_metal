@@ -167,6 +167,7 @@ pub fn compile_cached(prog: &Program, smc: &Smc, code: &mut Code, hooks: &[(u32,
                         yield_: module.declare_func_in_func(h_yield, b.func),
                         poll: module.declare_data_in_func(d_poll, b.func),
                         guest_sig: b.import_signature(guest_sig.clone()),
+                        ftol: hooks.iter().any(|h| h.0 == crate::platform::crt::FTOL).then_some(crate::platform::crt::FTOL),
                     };
                     let mut get_fn = |func: &mut Function, a: u32| module.declare_func_in_func(ids[&a], func);
                     Lifter::new(b, f, prog, smc, &refs, &mut get_fn, tcfg).lift(code)

@@ -226,6 +226,11 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
         What is left of the imports is the per-call cost (~5000 imports a picture, ~0.15 us each:
         thunk lookup, recording with an allocation per call). To be confirmed by hand: Alt+Enter
         both ways, the picture's black bars, Alt+Tab, Win+L in a mission.
+      - `__ftol` inline at its call sites (`Lifter::ftol`, `Refs::ftol`; was a hook: x87 flush,
+        state stored, rt_hook's search; ~1.5 million calls a second in a mission, the hottest
+        hook by far): A/B 3 rounds 236-239 -> 241-246 fps, guest time per picture without a
+        tick 2.95 -> 2.87 ms. Tick fingerprints: camera, player and game time identical; the
+        rest differs as much as between two runs of the old build.
       Found on the way: a device loss in a mission (TestCooperativeLevel lost, not scripted)
       was followed by a null read in 0x47a6b0 (from 0x47a07a): to be looked at. 0x47a6b0 is
       the game's IDirect3DVertexBuffer9::Lock call on a null buffer (released by

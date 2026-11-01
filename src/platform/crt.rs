@@ -1,7 +1,8 @@
 //! C runtime functions of the game done by the host: they are called so often that the
 //! recompiled code costs much of a frame.
 //!
-//! `__ftol` (0x5870ac): st(0) to a 64-bit integer, truncated, popped, in edx:eax. The original
+//! `__ftol` (0x5870ac): st(0) to a 64-bit integer, truncated, popped, in edx:eax (its direct
+//! calls are done inline by the lifter, `Lifter::ftol`; this hook is for the rest). The original
 //! switches the FPU's rounding mode twice per call (fnstcw, fldcw), which is slow in
 //! recompiled x87.
 //!
