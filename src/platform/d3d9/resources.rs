@@ -795,7 +795,7 @@ fn buffer_unlock(c: &mut Cpu) -> u32 {
         let offset = guest - com::shadow(this, 0, 0);
         let bytes: Box<[u8]> = mem().slice(guest, size).into();
         let (p, lock_fn, unlock_fn) = (p as usize, v.Lock, v.Unlock);
-        q.record(Box::new(move || unsafe {
+        q.record(move || unsafe {
             let p = p as *mut c_void;
             let mut data: *mut c_void = std::ptr::null_mut();
             let r = lock_fn(p, offset, size as u32, &mut data, flags & !D3DLOCK_READONLY);
@@ -805,7 +805,7 @@ fn buffer_unlock(c: &mut Cpu) -> u32 {
             }
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), data as *mut u8, size);
             let _ = unlock_fn(p);
-        }));
+        });
         return 0;
     }
     super::queue::flush();
@@ -878,9 +878,9 @@ fn query_issue(c: &mut Cpu) -> u32 {
     let flags = arg(c, 1);
     if let Some(q) = super::queue::global() {
         let (p, issue) = (p as usize, v.Issue);
-        q.record(Box::new(move || {
+        q.record(move || {
             let _ = unsafe { issue(p as *mut c_void, flags) };
-        }));
+        });
         return 0;
     }
     hr(unsafe { (v.Issue)(p, flags) })

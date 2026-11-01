@@ -7,25 +7,113 @@
 //! too, and the game's thread is at most one picture ahead of the worker (`picture_done`).
 //!
 //! Commands go to the worker in batches (256, or at a flush or a picture's end), so the
-//! worker's side takes a lock per batch, not per call.
+//! worker's side takes a lock per batch, not per call. A batch is one buffer that holds the
+//! closures themselves (`Batch`); the worker hands emptied batches back, so recording
+//! allocates nothing once the buffers have grown (it was a Box per call, freed on the worker).
 //!
 //! On unless the registry value `D3DThread` is 0 or `GUNMETAL_D3D_THREAD=0`; always off with
 //! Direct3D 9Ex (`ex`).
 
 use crate::platform::log;
 use std::collections::VecDeque;
+use std::mem::{MaybeUninit, align_of, size_of};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
-
-/// A recorded device call.
-pub type Command = Box<dyn FnOnce() + Send>;
 
 /// Commands handed to the worker at once.
 const BATCH: usize = 256;
 
+/// The unit of a batch's buffer: commands start on 16-byte boundaries.
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+struct Chunk([u8; 16]);
+
+/// A command's header in a batch, followed by the closure itself in `chunks` chunks.
+struct Header {
+    /// moves the closure out and calls it
+    run: unsafe fn(*mut u8),
+    /// drops a closure that was never run
+    drop: unsafe fn(*mut u8),
+    chunks: usize,
+}
+
+const HEADER_CHUNKS: usize = size_of::<Header>().div_ceil(16);
+
+/// Recorded calls, closures stored one after another in one buffer.
+pub struct Batch {
+    buf: Vec<MaybeUninit<Chunk>>,
+    len: usize,
+}
+
+// SAFETY: only closures that are `Send` go in (`push`)
+unsafe impl Send for Batch {}
+
+impl Batch {
+    fn new() -> Batch {
+        Batch { buf: Vec::with_capacity(BATCH * 4), len: 0 }
+    }
+
+    fn push<F: FnOnce() + Send + 'static>(&mut self, f: F) {
+        const { assert!(align_of::<F>() <= 16 && align_of::<Header>() <= 16) };
+        unsafe fn run<F: FnOnce()>(p: *mut u8) {
+            unsafe { std::ptr::read(p as *mut F)() }
+        }
+        unsafe fn drop<F>(p: *mut u8) {
+            unsafe { std::ptr::drop_in_place(p as *mut F) }
+        }
+        let chunks = size_of::<F>().div_ceil(16);
+        let at = self.buf.len();
+        self.buf.resize(at + HEADER_CHUNKS + chunks, MaybeUninit::uninit());
+        let base = self.buf.as_mut_ptr();
+        // SAFETY: both fit in the chunks just added, which are 16-aligned
+        unsafe {
+            (base.add(at) as *mut Header).write(Header { run: run::<F>, drop: drop::<F>, chunks });
+            (base.add(at + HEADER_CHUNKS) as *mut F).write(f);
+        }
+        self.len += 1;
+    }
+
+    /// Each command's header and closure address, in order.
+    fn each(&mut self, mut f: impl FnMut(&Header, *mut u8)) {
+        let base = self.buf.as_mut_ptr();
+        let mut at = 0;
+        while at < self.buf.len() {
+            // SAFETY: `push` wrote a header here and its closure after it
+            let h = unsafe { &*(base.add(at) as *const Header) };
+            f(h, unsafe { base.add(at + HEADER_CHUNKS) } as *mut u8);
+            at += HEADER_CHUNKS + h.chunks;
+        }
+    }
+
+    /// Run every command in order (a panicking one is logged; the rest still run), leaving
+    /// the batch empty with its buffer kept.
+    fn run(&mut self) {
+        self.each(|h, p| {
+            // a failing call must not stop the queue: the game's thread would wait for ever
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { (h.run)(p) })).is_err() {
+                log!("d3d9 worker: a recorded call panicked");
+            }
+        });
+        self.buf.clear();
+        self.len = 0;
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+}
+
+impl Drop for Batch {
+    fn drop(&mut self) {
+        self.each(|h, p| unsafe { (h.drop)(p) });
+    }
+}
+
 #[derive(Default)]
 struct State {
     /// batches waiting for the worker, each with whether it ends a picture
-    batches: VecDeque<(Vec<Command>, bool)>,
+    batches: VecDeque<(Batch, bool)>,
+    /// emptied batches, for the recording side to reuse
+    free: Vec<Batch>,
     /// commands handed to the worker, and those it has run
     submitted: u64,
     done: u64,
@@ -50,7 +138,7 @@ pub struct Queue {
     shared: Arc<Shared>,
     wait_hook: WaitHook,
     /// commands recorded but not yet handed to the worker
-    batch: Mutex<Vec<Command>>,
+    batch: Mutex<Batch>,
 }
 
 impl Queue {
@@ -64,43 +152,48 @@ impl Queue {
         let shared = Arc::new(Shared { state: Mutex::new(State::default()), work: Condvar::new(), progress: Condvar::new() });
         let s = shared.clone();
         std::thread::Builder::new().name("d3d9 worker".into()).spawn(move || worker(&s)).expect("d3d9 worker thread");
-        Queue { shared, wait_hook: hook, batch: Mutex::new(Vec::with_capacity(BATCH)) }
+        Queue { shared, wait_hook: hook, batch: Mutex::new(Batch::new()) }
     }
 
     /// Record a call; the worker makes it after every call recorded before.
-    pub fn record(&self, c: Command) {
+    pub fn record<F: FnOnce() + Send + 'static>(&self, f: F) {
         let mut b = self.batch.lock().unwrap_or_else(|e| e.into_inner());
-        b.push(c);
+        b.push(f);
         if b.len() >= BATCH {
-            let full = std::mem::replace(&mut *b, Vec::with_capacity(BATCH));
-            self.submit(full, false);
+            self.submit(&mut b, false);
         }
     }
 
-    /// Hand the recorded commands to the worker; returns the number handed over in all.
-    fn submit(&self, batch: Vec<Command>, picture: bool) -> (u64, u64) {
+    /// Hand the recorded commands to the worker (`batch` gets an empty one); returns the
+    /// numbers of commands and pictures handed over in all.
+    fn submit(&self, batch: &mut Batch, picture: bool) -> (u64, u64) {
         let mut s = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
-        if batch.is_empty() && !picture {
+        if batch.len() == 0 && !picture {
             return (s.submitted, s.pictures);
         }
-        s.submitted += batch.len() as u64;
+        let empty = s.free.pop().unwrap_or_else(Batch::new);
+        let full = std::mem::replace(batch, empty);
+        s.submitted += full.len() as u64;
         if picture {
             s.pictures += 1;
         }
-        s.batches.push_back((batch, picture));
+        s.batches.push_back((full, picture));
+        let r = (s.submitted, s.pictures);
         drop(s);
         self.shared.work.notify_one();
-        let s = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
-        (s.submitted, s.pictures)
+        r
     }
 
-    fn take_batch(&self) -> Vec<Command> {
-        std::mem::replace(&mut *self.batch.lock().unwrap_or_else(|e| e.into_inner()), Vec::with_capacity(BATCH))
+    /// Hand over what is recorded (the recording side's lock held meanwhile, so the order
+    /// stays).
+    fn submit_recorded(&self, picture: bool) -> (u64, u64) {
+        let mut b = self.batch.lock().unwrap_or_else(|e| e.into_inner());
+        self.submit(&mut b, picture)
     }
 
     /// Return once the worker has made every call recorded so far.
     pub fn flush(&self) {
-        let (target, _) = self.submit(self.take_batch(), false);
+        let (target, _) = self.submit_recorded(false);
         self.wait_until(|s| s.done >= target);
     }
 
@@ -120,7 +213,7 @@ impl Queue {
     /// The picture's calls are recorded (its Present last): hand them over, then wait until
     /// the worker has finished the picture before this one.
     pub fn picture_done(&self) {
-        let (_, pictures) = self.submit(self.take_batch(), true);
+        let (_, pictures) = self.submit_recorded(true);
         self.wait_until(|s| s.pictures_done + 1 >= pictures);
     }
 
@@ -140,7 +233,7 @@ impl Default for Queue {
 
 fn worker(s: &Shared) {
     loop {
-        let (batch, picture) = {
+        let (mut batch, picture) = {
             let mut st = s.state.lock().unwrap_or_else(|e| e.into_inner());
             loop {
                 if let Some(b) = st.batches.pop_front() {
@@ -150,14 +243,10 @@ fn worker(s: &Shared) {
             }
         };
         let n = batch.len() as u64;
-        for c in batch {
-            // a failing call must not stop the queue: the game's thread would wait for ever
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(c)).is_err() {
-                log!("d3d9 worker: a recorded call panicked");
-            }
-        }
+        batch.run();
         let mut st = s.state.lock().unwrap_or_else(|e| e.into_inner());
         st.done += n;
+        st.free.push(batch);
         if picture {
             st.pictures_done += 1;
         }

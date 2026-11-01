@@ -66,12 +66,12 @@ macro_rules! queued {
             match super::queue::global() {
                 None => hr(call()),
                 Some(q) => {
-                    q.record(Box::new(move || {
+                    q.record(move || {
                         let r = call();
                         if r.is_err() {
                             worker_failed(stringify!($m), r);
                         }
-                    }));
+                    });
                     0
                 }
             }
@@ -79,14 +79,53 @@ macro_rules! queued {
     };
 }
 
-/// A copy of guest bytes [a, a + n) for a recorded call (None for a null pointer).
-pub fn copy_in(a: u32, n: usize) -> Option<Box<[u8]>> {
-    (a != 0).then(|| mem().slice(a, n).into())
+/// Bytes a recorded call copied from guest memory (`copy_in`): up to `Copied::INLINE` in the
+/// command itself (matrices, lights, materials, shader constants: no allocation), more on the
+/// heap.
+pub enum Copied {
+    None,
+    Inline(Inline),
+    Heap(Box<[u8]>),
+}
+
+#[repr(C, align(16))]
+pub struct Inline([u8; Copied::INLINE]);
+
+impl Copied {
+    pub const INLINE: usize = 128;
+
+    /// The pointer a recorded call passes for the copy (null for none).
+    pub fn as_ptr<T>(&self) -> *const T {
+        match self {
+            Copied::None => std::ptr::null(),
+            Copied::Inline(b) => b.0.as_ptr() as *const T,
+            Copied::Heap(b) => b.as_ptr() as *const T,
+        }
+    }
+
+    pub fn is_none(&self) -> bool {
+        matches!(self, Copied::None)
+    }
+}
+
+/// A copy of guest bytes [a, a + n) for a recorded call (none for a null pointer).
+pub fn copy_in(a: u32, n: usize) -> Copied {
+    if a == 0 {
+        return Copied::None;
+    }
+    let src = mem().slice(a, n);
+    if n <= Copied::INLINE {
+        let mut b = Inline([0; Copied::INLINE]);
+        b.0[..n].copy_from_slice(src);
+        Copied::Inline(b)
+    } else {
+        Copied::Heap(src.into())
+    }
 }
 
 /// The pointer a recorded call passes for a copy (null for none).
-fn ptr<T>(b: &Option<Box<[u8]>>) -> *const T {
-    b.as_ref().map_or(std::ptr::null(), |b| b.as_ptr() as *const T)
+fn ptr<T>(b: &Copied) -> *const T {
+    b.as_ptr()
 }
 
 /// A recorded call failed on the worker: logged once per method.
@@ -344,11 +383,11 @@ fn present_queued(c: &Cpu, q: &'static super::queue::Queue) -> u32 {
     let (p, v) = dv(c);
     let (src, dst, w) = (copy_in(arg(c, 1), 16), copy_in(arg(c, 2), 16), arg(c, 3));
     // RGNDATA: a 32-byte header whose nCount (at 8) rectangles of 16 bytes follow
-    let region = (arg(c, 4) != 0).then(|| 32 + 16 * mem().rd32(arg(c, 4) + 8) as usize).and_then(|n| copy_in(arg(c, 4), n));
+    let region = if arg(c, 4) != 0 { copy_in(arg(c, 4), 32 + 16 * mem().rd32(arg(c, 4) + 8) as usize) } else { Copied::None };
     let win = if w == 0 { 0 } else { super::host_hwnd(w).0 as usize };
     let target = if w == 0 { super::host_hwnd(crate::platform::user32::main_window()).0 as usize } else { win };
     let (p, present_fn) = (p as usize, v.Present);
-    q.record(Box::new(move || {
+    q.record(move || {
         let p = p as *mut c_void;
         let v = unsafe { vtbl::<IDirect3DDevice9_Vtbl>(p) };
         super::shot::before_present(p, None);
@@ -359,7 +398,7 @@ fn present_queued(c: &Cpu, q: &'static super::queue::Queue) -> u32 {
             clear_back_buffer(p, v);
         }
         LAST_COOP.store(hr(unsafe { (v.TestCooperativeLevel)(p) }), Ordering::Relaxed);
-    }));
+    });
     q.picture_done();
     if frames {
         crate::platform::frames::after_present();
@@ -414,14 +453,17 @@ fn set_gamma_ramp(c: &mut Cpu) -> u32 {
     static LAST: std::sync::Mutex<Option<(u32, u32, Box<[u8]>)>> = std::sync::Mutex::new(None);
     {
         let mut last = crate::platform::lock(&LAST);
-        let now = ramp.as_ref().map(|r| (sc, flags, r.clone()));
+        let now = match &ramp {
+            Copied::Heap(r) => Some((sc, flags, r.clone())),
+            _ => None,
+        };
         if now.is_some() && *last == now {
             return 0;
         }
         *last = now;
     }
     let (p, f) = (p as usize, v.SetGammaRamp);
-    q.record(Box::new(move || unsafe { f(p as *mut c_void, sc, flags, ptr(&ramp)) }));
+    q.record(move || unsafe { f(p as *mut c_void, sc, flags, ptr(&ramp)) });
     0
 }
 
@@ -785,12 +827,12 @@ fn draw_primitive_up(c: &mut Cpu) -> u32 {
     let n = resources::primitive_vertices(ty, count).saturating_mul(stride) as usize;
     if let Some(q) = super::queue::global() {
         let (p, f, vertices) = (p as usize, v.DrawPrimitiveUP, copy_in(data, n));
-        q.record(Box::new(move || {
+        q.record(move || {
             let r = unsafe { f(p as *mut c_void, D3DPRIMITIVETYPE(ty as i32), count, ptr(&vertices), stride) };
             if r.is_err() {
                 worker_failed("DrawPrimitiveUP", r);
             }
-        }));
+        });
         return 0;
     }
     hr(unsafe { (v.DrawPrimitiveUP)(p, D3DPRIMITIVETYPE(ty as i32), count, cp(data), stride) })
@@ -812,12 +854,12 @@ fn draw_indexed_primitive_up(c: &mut Cpu) -> u32 {
     if let Some(q) = super::queue::global() {
         let vertex_bytes = min.saturating_add(nv).saturating_mul(stride) as usize;
         let (p, f, indices, vertices) = (p as usize, v.DrawIndexedPrimitiveUP, copy_in(idx, index_bytes as usize), copy_in(data, vertex_bytes));
-        q.record(Box::new(move || {
+        q.record(move || {
             let r = unsafe { f(p as *mut c_void, D3DPRIMITIVETYPE(ty as i32), min, nv, count, ptr(&indices), D3DFORMAT(fmt), ptr(&vertices), stride) };
             if r.is_err() {
                 worker_failed("DrawIndexedPrimitiveUP", r);
             }
-        }));
+        });
         return 0;
     }
     hr(unsafe { (v.DrawIndexedPrimitiveUP)(p, D3DPRIMITIVETYPE(ty as i32), min, nv, count, cp(idx), D3DFORMAT(fmt), cp(data), stride) })

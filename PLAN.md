@@ -249,6 +249,11 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
         indirect calls and jumps (bounds check and load, `rt_lookup` only out of range, a store
         of `Cpu::foreign` every time): A/B 256-260 against 249-260 fps, no measurable change
         (rt_lookup was 1.9 % of the samples).
+      - Recorded D3D calls without an allocation: a batch is one reused buffer holding the
+        closures themselves (`queue::Batch`, emptied batches go back from the worker), and
+        `copy_in` keeps up to 128 bytes in the command (`device::Copied`). A/B: imports per
+        picture without a tick 0.61-0.64 -> 0.53 ms, fps 249-254 -> 250-255 (that round ran
+        slower overall).
       Found on the way: a device loss in a mission (TestCooperativeLevel lost, not scripted)
       was followed by a null read in 0x47a6b0 (from 0x47a07a): to be looked at. 0x47a6b0 is
       the game's IDirect3DVertexBuffer9::Lock call on a null buffer (released by

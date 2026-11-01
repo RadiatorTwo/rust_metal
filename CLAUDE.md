@@ -141,7 +141,8 @@ CreateProcessA, EnumSystemLocalesA, file mappings, CreateFileW).
 Direct3D 9 (`d3d9/`): the device's calls run on a worker thread (`queue.rs`, on by default;
 registry `D3DThread` = 0 or `GUNMETAL_D3D_THREAD=0` turn it off, always off with 9Ex): the
 methods that set state or draw, Present, SetGammaRamp (an unchanged ramp skipped), Query Issue
-and buffer Unlock are recorded with copies of their pointed-to data (`device::copy_in`) and
+and buffer Unlock are recorded with copies of their pointed-to data (`device::copy_in`, up to 128 bytes inside the
+command) into batches that hold the closures themselves (`queue::Batch`, reused: no allocation per call) and
 return D3D_OK at once, keeping the turn; batches of 256 go to the worker, and Present waits
 only for the picture before it. Get*State come from a cache (`state.rs`, refilled lazily after
 CreateDevice, Reset and state blocks), TestCooperativeLevel is the worker's answer after its

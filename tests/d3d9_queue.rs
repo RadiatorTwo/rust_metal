@@ -20,6 +20,39 @@ fn runs_in_record_order() {
     assert_eq!(q.pending(), 0);
 }
 
+/// Closures of every size, stored in the batches themselves, run in order with what they
+/// captured, also over many batches that are handed back and reused; one that panics does not
+/// stop the rest.
+#[test]
+fn closures_of_any_size() {
+    let q = Queue::new();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    for round in 0..3u32 {
+        for i in 0..700u32 {
+            let s = seen.clone();
+            let n = round * 700 + i;
+            match i % 4 {
+                0 => q.record(move || s.lock().unwrap().push(n)),
+                1 => {
+                    let big = [n as u8; 300];
+                    q.record(move || s.lock().unwrap().push(n + big[299] as u32 - n as u8 as u32));
+                }
+                2 => {
+                    let v = vec![n; 3];
+                    q.record(move || s.lock().unwrap().push(v[2]));
+                }
+                _ => {
+                    q.record(|| panic!("a failing call"));
+                    q.record(move || s.lock().unwrap().push(n));
+                }
+            }
+        }
+        q.flush();
+    }
+    assert_eq!(*seen.lock().unwrap(), (0..2100).collect::<Vec<_>>());
+    assert_eq!(q.pending(), 0);
+}
+
 #[test]
 fn flush_waits() {
     let q = Queue::new();
@@ -111,13 +144,17 @@ fn copy_in_takes_a_snapshot() {
     use rust_metal::platform::d3d9::device::copy_in;
     use rust_metal::platform::{alloc, init_memory};
     let m = init_memory();
-    let a = alloc(64);
-    for k in 0..64u32 {
-        m.slice(a + k, 1)[0] = k as u8 + 1;
+    // inline (up to 128 bytes) and on the heap
+    for n in [64usize, 200] {
+        let a = alloc(n as u32);
+        for k in 0..n as u32 {
+            m.slice(a + k, 1)[0] = k as u8 + 1;
+        }
+        let copy = copy_in(a, n);
+        m.slice(a, n).fill(0);
+        let got = unsafe { std::slice::from_raw_parts(copy.as_ptr::<u8>(), n) };
+        assert_eq!(got, &(1..=n as u32).map(|k| k as u8).collect::<Vec<_>>()[..]);
     }
-    let copy = copy_in(a, 64).unwrap();
-    m.slice(a, 64).fill(0);
-    assert_eq!(&copy[..], &(1..=64u8).collect::<Vec<_>>()[..]);
     assert!(copy_in(0, 64).is_none());
 }
 
