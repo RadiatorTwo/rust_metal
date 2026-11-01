@@ -302,14 +302,56 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
       lock buffers ~50, .data ~10), the same heap ranges in every probe. A world copy for (a)
       would have to sync ~3.3 MB of pages per tick, and the drawing writes ~1.1 MB of pages
       that the tick writes too (object/node state, not only renderer data)
-      Resumed 2026-11-01 (the user). Step 1 done: worlds A, B, C (`platform/world.rs`) with
-      a page map written by generated stores instead of write watch (cost and checks in the
-      plan's step 1); off by default, no cost when off. Step 2 done (thread roles, imports per
-      role, frees held back, D3D setters recorded and replayed). Step 3 done (`serial`: the
-      world update runs in B on the tick thread, the main thread waits; same fingerprints as
-      off; fork ~0.85 ms, join ~0.16 ms). Step 4 in progress: overlap
-      built, the game's node pool and llist headers ruled; overlap still hangs after the first
-      join (plan, step 4). `serial` fine.
+      Resumed 2026-11-01 (the user), state at the end of that day (details: the plan's steps
+      1-4; switch `GUNMETAL_TICK_THREAD` / registry `TickThread`, off by default):
+      - Step 1 done (c1e5505): worlds A, B, C (`platform/world.rs`). Write watch dropped
+        (GetWriteWatch with reset ~0.6 ms a call whatever the range); instead a page map per
+        memory, a byte per 4 KB page at `rt::MAP_OFF` below guest address 0, set by generated
+        stores (`Lifter::mark`, only when the tick thread is on: part of the cache key) and
+        host writes (`Memory::wr*`/`slice`/`mark`, `rt_string`, `rt_x87`, `d3d9::gp`); stores
+        through esp unmarked (stacks copied whole), a marked page also stands for the next
+        page's first 8 bytes. A/B: off no cost; on -5 % fps (a first try with the map in a
+        register and every store marked: -17 %). `GUNMETAL_WORLD_VERIFY=1` found no unmarked
+        writes in the front end and mission 1 (other threads' stacks: marked when they end).
+      - Step 2 done (9b502f1): `world::Role`; the tick thread takes no turn; its imports by
+        `world::tick_rule` (live / D3D setters recorded and replayed at the join /
+        unexpected: logged); one heap for all worlds (blocks zeroed in A, B, C; frees held
+        back while a tick runs); `kernel32::pose_as` (thread id, TLS). One table of critical
+        sections (the tick thread has the main thread's id).
+      - Step 3 done (a31b9d1): `serial` (`platform/tick.rs`): the world update 0x413c60 runs in
+        B on a persistent tick thread, the main thread waits, then merge, frees, replay.
+        Fingerprints against off over 1301 ticks: game time, camera, player, objects, `_rand`
+        identical, the units' hash differs in 19-42 ticks (as between two off runs). Device
+        loss, blur/focus, minimise, cold starts and the exit fine. Per tick: fork 0.7-0.9 ms
+        (sync of ~2100 pages the pictures since the last tick wrote), join ~0.16 ms (~870
+        pages copied).
+      - Step 4 in progress (8cc23e6): overlap built (fork returns as P6's `ret 4`; joins at
+        game_frame, every tick part and main-thread imports outside game_frame;
+        `fps::world_time` draws the tick before while one runs; `check` logs bytes both
+        changed). Rules found so far: the game's 12-byte node pool (pool_alloc 0x55e5b0,
+        pool_free 0x55e670, free list 0x76c2d4) hooked onto one free list in A with frees held
+        back to the join (both worlds had handed out the same node: a fault at the first
+        overlap); llist headers (count, head, tail, cursor +0xc; ops 0x55e6d0 remove,
+        0x55e740/0x55e840/0x55e910 insert; the cursor also moved inline) merged whole from
+        the side that changed the list. The hang after the first join (the clearing loop
+        0x54ec00 of the depth-sorted list at +0x24, filled by 0x54ec20, walking the pool's
+        free list for ever) was the pool hook itself: pool_alloc read its size argument from
+        A at the tick thread's esp (A has the main thread's stack there), so the tick's
+        allocations mostly went to the original, in B, with B's own free list (+51 nodes in
+        the first tick): the merge then brought B's pool head into A and nodes were handed out
+        twice. Fixed (the argument read from the thread's own memory); a join now logs once
+        if the pool's globals changed in B. Second fix: list headers on the tick thread's
+        stack below the fork (its locals) are no longer copied into A (they landed on the main
+        thread's stack: a fault reading through a stale cursor). With both, `check` runs the
+        short script (300 ticks, 20 logged joins) to the exit: waited 0.66 ms per tick (134 of
+        250 joins waited) against 5.6 in `serial`; join 509 pages copied, 361 merged, ~47
+        bytes both changed per tick (renderer state 0x6bc374..0x6bc3b2, camera globals
+        0x72a7d8..). `serial` still fine.
+      - Next: the bytes both changed (what the drawing and the tick share; the tick's are
+        kept now), fingerprints of `1` against off, longer runs (bench script, cold starts,
+        device loss, exit mid-tick).
+        Left for later: the sync on the tick thread between ticks (needs marks written after
+        the store, host `slice` writes re-marked after imports), steps 5-7.
       Step 0 of `docs/superpowers/plans/2026-10-31-tick-thread.md` (2026-10-31, `ticks.rs`,
       `GUNMETAL_TICK_PROBE`, `GUNMETAL_TICK_PRINT`, tick-indexed `GUNMETAL_INPUT` items `t<N>:`;
       report `.superpowers/perf/task-tt0-report.md`; mission 1, 651 ticks, ~14 cold runs):

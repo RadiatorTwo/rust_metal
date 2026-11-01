@@ -180,7 +180,15 @@ pub fn join() -> Option<Box<Cpu>> {
     let waited = t0.elapsed();
     let t1 = std::time::Instant::now();
     let w = world::worlds().expect("worlds");
-    let lists = lists_before();
+    // the pool's globals are A's alone (`pool_alloc`): changed in B, the merge would bring a
+    // second free list into A (seen: nodes handed out twice, a list walked for ever)
+    for a in [POOL_HEAD, POOL_USED, POOL_BASE] {
+        if w.b.rd32(a) != w.c.rd32(a) {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| log!("tick: the pool's {a:#x} changed in B: {:#x} -> {:#x}", w.c.rd32(a), w.b.rd32(a)));
+        }
+    }
+    let lists = lists_before((STACK_LO, f.esp));
     let merged = world::merge(w, &f.ranges, (STACK_LO, f.esp));
     lists_merge(&lists);
     world::FREES.set_running(false);
@@ -229,7 +237,8 @@ static POOL: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
 fn pool_alloc(c: &mut Cpu) {
     let m = game_mem();
-    let size = m.rd32(c.r[ESP] + 4);
+    // the argument on this thread's stack (the tick thread's is in B)
+    let size = super::mem().rd32(c.r[ESP] + 4);
     let _g = POOL.lock().unwrap_or_else(|e| e.into_inner());
     let head = m.rd32(POOL_HEAD);
     if size != 12 || head == 0 || m.rd32(POOL_BASE) == 0 {
@@ -301,12 +310,17 @@ fn llist_op(c: &mut Cpu, i: usize) {
     call_original(c, LLIST_OPS[i]);
 }
 
-/// Before the merge: the headers of lists only the main thread changed (as A has them).
-fn lists_before() -> Vec<(u32, u8, [u8; LLIST_HEAD])> {
+/// Before the merge: the headers of lists only the main thread changed (as A has them). Lists
+/// in `skip` (the tick thread's stack below the fork: its locals, the main thread's in A) are
+/// left out, as `world::merge` leaves those bytes.
+fn lists_before(skip: (u32, u32)) -> Vec<(u32, u8, [u8; LLIST_HEAD])> {
     let l = std::mem::take(&mut *LISTS.lock().unwrap_or_else(|e| e.into_inner()));
     let a = game_mem();
     let mut out = Vec::with_capacity(l.len());
     for (list, (who, main_ret, tick_ret)) in l {
+        if (skip.0..skip.1).contains(&list) {
+            continue;
+        }
         if who == 3 {
             static SEEN: Mutex<std::collections::BTreeSet<u32>> = Mutex::new(std::collections::BTreeSet::new());
             if SEEN.lock().unwrap_or_else(|e| e.into_inner()).insert(list) {
