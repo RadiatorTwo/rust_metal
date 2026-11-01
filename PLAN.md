@@ -245,6 +245,10 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
         variables (set with the registers after calls and helpers, and by fldcw/fninit) instead
         of a load and two compares per arithmetic instruction: code 2 % smaller, but A/B
         257-259 -> 255-256 fps (a value live across every block costs a register).
+      Tried and dropped (2026-11-01): the direct table read inline in generated code at
+        indirect calls and jumps (bounds check and load, `rt_lookup` only out of range, a store
+        of `Cpu::foreign` every time): A/B 256-260 against 249-260 fps, no measurable change
+        (rt_lookup was 1.9 % of the samples).
       Found on the way: a device loss in a mission (TestCooperativeLevel lost, not scripted)
       was followed by a null read in 0x47a6b0 (from 0x47a07a): to be looked at. 0x47a6b0 is
       the game's IDirect3DVertexBuffer9::Lock call on a null buffer (released by
