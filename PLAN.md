@@ -241,6 +241,10 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
       - DirectSound's CommitDeferredSettings on a thread of its own (`dsound::committer`; a
         listener's Release waits for its commit): A/B 255-257 -> 257-260 fps, logic per tick
         3.54 -> 3.38 ms. To be confirmed by ear: 3D sound positions in a mission.
+      Tried and dropped (2026-11-01): the x87 control word and its rounding mode in Cranelift
+        variables (set with the registers after calls and helpers, and by fldcw/fninit) instead
+        of a load and two compares per arithmetic instruction: code 2 % smaller, but A/B
+        257-259 -> 255-256 fps (a value live across every block costs a register).
       Found on the way: a device loss in a mission (TestCooperativeLevel lost, not scripted)
       was followed by a null read in 0x47a6b0 (from 0x47a07a): to be looked at. 0x47a6b0 is
       the game's IDirect3DVertexBuffer9::Lock call on a null buffer (released by
