@@ -386,6 +386,14 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
         after such a join the drawing called a vertex buffer the tick had released (3 of 4
         runs). A join must be at a point where the main thread holds no pointers into the
         world. Needs a real rule (who activates, who frees, what the original's order is).
+      - Who uses the lights (temporary `DEBUG lights` hooks in `tick.rs`, every 50 ticks):
+        the tick allocates (0x490bf0 from 0x54e9ff), creates (0x54eb40 from 0x449a86), sets
+        (0x550a90 from 0x44a289) and deletes (0x54ea60 from 0x44a0c4) lights; the main thread
+        turns them on in the drawing (0x54f080 from 0x54c97f, ~1500 per 50 ticks during a
+        tick) and also sets them every picture (0x550a90 from 0x44a289, the same caller as
+        the tick's). That run then faulted elsewhere: lists 0x72a84c (from 0x54b03a) and a
+        heap list (from 0x535f87) changed by both, then a fault in 0x535c90. The combat
+        benchmark finds more shared state than the walk did: step 5 (a rule per conflict).
       - Next: the light rule; fingerprints of `1` against off; the bytes both changed (the
         tick's kept now); longer runs (cold starts, device loss, exit mid-tick).
         Left for later: the sync on the tick thread between ticks (needs marks written after

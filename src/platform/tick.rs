@@ -400,8 +400,32 @@ fn join_first(c: &mut Cpu, i: usize) {
     call_original(c, JOIN_FIRST[i]);
 }
 
+// DEBUG lights
+const DBG_LIGHT: [u32; 6] = [0x54f080, 0x54e860, 0x54ea60, 0x550a90, 0x54eb40, 0x490bf0];
+static DBG: Mutex<std::collections::BTreeMap<(u32, u8, bool, u32), u32>> = Mutex::new(std::collections::BTreeMap::new());
+fn dbg_light(c: &mut Cpu, i: usize) {
+    let who = if world::is_tick() { 2 } else { 1 };
+    let ret = super::mem().rd32(c.r[ESP]);
+    *DBG.lock().unwrap().entry((DBG_LIGHT[i], who, inflight(), ret)).or_insert(0) += 1;
+    call_original(c, DBG_LIGHT[i]);
+}
+fn dbg_dump() {
+    let m = game_mem();
+    let active: Vec<u32> = (0..128).filter(|&h| m.rd8(0x71e7ec + 0x80 + h) != 0).collect();
+    let used = (0..128).filter(|&h| m.rd8(0x71e7ec + h) != 0).count();
+    let d = std::mem::take(&mut *DBG.lock().unwrap());
+    let v: Vec<String> = d.iter().map(|((f, w, i, r), n)| format!("{f:#x}/{w}/{}/{r:#x}*{n}", if *i { "fl" } else { "-" })).collect();
+    log!("DEBUG lights: used {used} active {active:?}; calls {}", v.join(" "));
+}
+
 /// Hooks while the tick thread is on (`platform::hooks`).
-pub const HOOKS: [(u32, crate::rt::Hook); 8] = [
+pub const HOOKS: [(u32, crate::rt::Hook); 14] = [
+    (DBG_LIGHT[0], |c| dbg_light(c, 0)),
+    (DBG_LIGHT[1], |c| dbg_light(c, 1)),
+    (DBG_LIGHT[2], |c| dbg_light(c, 2)),
+    (DBG_LIGHT[3], |c| dbg_light(c, 3)),
+    (DBG_LIGHT[4], |c| dbg_light(c, 4)),
+    (DBG_LIGHT[5], |c| dbg_light(c, 5)),
     (ROUTER_DRAIN, router_drain),
     (JOIN_FIRST[0], |c| join_first(c, 0)),
     (POOL_ALLOC, pool_alloc),
@@ -444,6 +468,9 @@ fn note(synced: usize, fork: std::time::Duration, wait: std::time::Duration, joi
         for a in &m.at {
             *at.entry(*a).or_insert(0) += 1;
         }
+    }
+    if s.n % 50 == 0 {
+        dbg_dump();
     }
     if s.n == 250 {
         let n = s.n as f64;
