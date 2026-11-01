@@ -367,8 +367,27 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
         217/195/205 (no gain); the main thread's time per tick 3.97-4.61 -> 1.07-1.30 ms, but
         a tick comes every ~8 pictures and the marking costs 2-6 %: they cancel out. To gain:
         fork cheaper (fewer pages synced) and a later join (the drawing's router drain).
-      - Next: the bytes both changed (the tick's kept now), fingerprints of
-        `1` against off, longer runs (cold starts, device loss, exit mid-tick).
+      - The drawing waits at the router drain only when A's queue is not empty (0-2 of 250
+        ticks; the picture after each join empties it): waited 2-4 -> 0.1-1.8 ms per tick, no
+        flicker (pictures every frame, odd-one-out 0.026 %).
+      - New benchmark `.superpowers/bench_game/bench3.txt` (recorded by the user, 2026-11-01:
+        mission from 26 s, 1008 ticks of combat, robot and jet, 68 s a run). Off against `1`,
+        interleaved: fps 145/145/146 against 157/157 (+8 %), pictures with a tick 10.8 -> 7.4
+        ms, p99 15.0 -> 10.7 ms. The third `1` run: the pool's free list empty (the game's
+        assertion "headOfFreeElements" in gunmetal.log), then a fault: the sound lists
+        (sound_play 0x4641b0 adds at +0x20, sound_new_voice 0x465bc0 at +0xd0) changed by both.
+        Rule: the main thread joins before sound_play (`tick::JOIN_FIRST`, 0-7 of 250 ticks);
+        4 of 4 `check` runs then without "changed by both".
+      - Open: the light manager 0x71e7ec (Lights.cpp: used +0, active +0x80, count +0x350c;
+        alloc 0x490bf0, free 0x490d20, set active 0x490ff0, a light object's update 0x550b00
+        keeps it in step with +0xb6). One `check` run of 4: the game's assertion "!Active[Handle]"
+        (a light freed in the tick while active); none without the tick thread. Joining before
+        its methods is wrong: they run in the middle of the drawing (0x550af3, 0x550b56), and
+        after such a join the drawing called a vertex buffer the tick had released (3 of 4
+        runs). A join must be at a point where the main thread holds no pointers into the
+        world. Needs a real rule (who activates, who frees, what the original's order is).
+      - Next: the light rule; fingerprints of `1` against off; the bytes both changed (the
+        tick's kept now); longer runs (cold starts, device loss, exit mid-tick).
         Left for later: the sync on the tick thread between ticks (needs marks written after
         the store, host `slice` writes re-marked after imports), steps 5-7.
       Step 0 of `docs/superpowers/plans/2026-10-31-tick-thread.md` (2026-10-31, `ticks.rs`,

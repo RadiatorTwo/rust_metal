@@ -353,20 +353,57 @@ fn lists_merge(lists: &[(u32, u8, [u8; LLIST_HEAD])]) {
 /// its end (0x4139c8), after the tick in the original. While a tick runs, the tick queues on
 /// the same list (seen: both changed it, then a call through a freed object); put off to
 /// the join instead, the objects were missing from the pictures in between (all but the
-/// player and the ground flickered). So the drawing waits for the tick here: the merged
-/// world, then the call, in the original's order.
+/// player and the ground flickered). So the drawing waits for the tick here when A's queue
+/// is not empty: the merged world, then the call, in the original's order. An empty queue
+/// (the usual case: the picture after each join drains it) the drawing does not touch, so it
+/// goes on without waiting.
 pub const ROUTER_DRAIN: u32 = 0x503c80;
+/// The router's queue list (`this` + this), its count at +0.
+const ROUTER_QUEUE: u32 = 0x906c;
+/// Joins at the router drain (its queue not empty), for the summary.
+static DRAIN_JOINS: AtomicU32 = AtomicU32::new(0);
 
 fn router_drain(c: &mut Cpu) {
-    if !world::is_tick() {
-        join();
+    if !world::is_tick() && inflight() {
+        let m = game_mem();
+        let q = m.rd32(c.r[crate::rt::ECX] + ROUTER_QUEUE);
+        if q == 0 || m.rd32(q) != 0 {
+            DRAIN_JOINS.fetch_add(1, Ordering::Relaxed);
+            join();
+        }
     }
     call_original(c, ROUTER_DRAIN);
 }
 
+// ---- shared game state the main thread waits for --------------------------------------------
+
+/// Functions that change state the tick changes too, with no merge rule yet: on the main thread
+/// while a tick runs, they wait for it (join) first.
+/// - sound_play 0x4641b0 (thiscall, ~30 callers): a voice for a sample, put on the sound
+///   object's lists (+0x20 here, +0xd0 in sound_new_voice 0x465bc0). When both added to these
+///   lists while a tick ran, one side's nodes were lost and a node later went back to the pool
+///   twice (seen: the pool's free list empty, the game's assertion "headOfFreeElements", a fault).
+/// A join is only safe where the main thread holds no pointers into the world: the light
+/// manager's methods (0x490bf0 ...) joined in the middle of the drawing, which then called a
+/// vertex buffer the tick had released.
+pub const JOIN_FIRST: [u32; 1] = [0x4641b0];
+/// Joins before each of `JOIN_FIRST`, for the summary.
+static FIRST_JOINS: [AtomicU32; 1] = [const { AtomicU32::new(0) }; 1];
+
+fn join_first(c: &mut Cpu, i: usize) {
+    if !world::is_tick() && inflight() {
+        if FIRST_JOINS[i].fetch_add(1, Ordering::Relaxed) == 0 {
+            log!("tick: a join before {:#x}, called from {:#x}", JOIN_FIRST[i], game_mem().rd32(c.r[ESP]));
+        }
+        join();
+    }
+    call_original(c, JOIN_FIRST[i]);
+}
+
 /// Hooks while the tick thread is on (`platform::hooks`).
-pub const HOOKS: [(u32, crate::rt::Hook); 7] = [
+pub const HOOKS: [(u32, crate::rt::Hook); 8] = [
     (ROUTER_DRAIN, router_drain),
+    (JOIN_FIRST[0], |c| join_first(c, 0)),
     (POOL_ALLOC, pool_alloc),
     (POOL_FREE, pool_free),
     (LLIST_OPS[0], |c| llist_op(c, 0)),
@@ -411,7 +448,7 @@ fn note(synced: usize, fork: std::time::Duration, wait: std::time::Duration, joi
     if s.n == 250 {
         let n = s.n as f64;
         log!(
-            "tick: per tick fork {:.3} ms ({:.0} pages synced), waited {:.3} ms ({} of {} joins), join {:.3} ms ({:.0} pages copied, {:.0} merged, {:.1} bytes both changed)",
+            "tick: per tick fork {:.3} ms ({:.0} pages synced), waited {:.3} ms ({} of {} joins), join {:.3} ms ({:.0} pages copied, {:.0} merged, {:.1} bytes both changed), {} joined at the router drain, before {:?}",
             s.fork / n,
             s.synced as f64 / n,
             s.wait / n,
@@ -420,7 +457,9 @@ fn note(synced: usize, fork: std::time::Duration, wait: std::time::Duration, joi
             s.join / n,
             s.copied as f64 / n,
             s.merged as f64 / n,
-            s.conflicts as f64 / n
+            s.conflicts as f64 / n,
+            DRAIN_JOINS.swap(0, Ordering::Relaxed),
+            FIRST_JOINS.iter().map(|n| n.swap(0, Ordering::Relaxed)).collect::<Vec<_>>()
         );
         *g = None;
         let mut at = CONFLICTS.lock().unwrap_or_else(|e| e.into_inner());
