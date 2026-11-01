@@ -235,6 +235,9 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
         `THUNK_META`) and a COM object's host pointer (`com::HOSTS`) are read lock-free:
         A/B 3 rounds 242-245 -> 243-250 fps (~1 %, partly noise). Left on the import path:
         the D3D state cache's lock, the queue's batch lock and a Box per recorded call.
+      - mimalloc as the global allocator (the D3D worker frees what the game's thread
+        allocates for every recorded call): A/B 3 rounds 248-250 -> 256-259 fps, imports per
+        picture without a tick 0.71 -> 0.60 ms.
       Found on the way: a device loss in a mission (TestCooperativeLevel lost, not scripted)
       was followed by a null read in 0x47a6b0 (from 0x47a07a): to be looked at. 0x47a6b0 is
       the game's IDirect3DVertexBuffer9::Lock call on a null buffer (released by

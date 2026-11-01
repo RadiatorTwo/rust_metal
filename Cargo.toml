@@ -18,6 +18,7 @@ cranelift-module = "0.137"
 cranelift-native = "0.137"
 sha2 = "0.11.1"
 winit = "0.30"
+mimalloc = { version = "0.1", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["Win32_Graphics_Direct3D9", "Win32_Graphics_Direct3D", "Win32_Graphics_Gdi", "Win32_Foundation", "Win32_Media_Audio", "Win32_Media_Audio_DirectSound", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant"] }

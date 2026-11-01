@@ -10,6 +10,11 @@ use rust_metal::jit::compile_cached;
 use rust_metal::smc::Smc;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
+
+/// mimalloc: the Direct3D worker frees what the game's thread allocates for every recorded
+/// call (~4000 a picture); with the system heap that cost ~0.1 us a call.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use std::time::Instant;
 
 fn main() {
