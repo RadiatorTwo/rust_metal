@@ -55,10 +55,14 @@ fn release_frees() {
     let s = com::shadow(g, 0, 4096);
     assert_ne!(s, 0);
     com::release(g, 0);
+    // the shadow went back to the heap: the same bytes serve the next asker (the object itself
+    // stays in quarantine with the dead vtable)
+    let a = rust_metal::platform::alloc(4096);
+    assert_eq!(a, s);
+    rust_metal::platform::free(a);
     let g2 = com::wrap(&M, fake(4));
+    assert_ne!(g2, g);
     assert_eq!(com::host(g2), fake(4));
-    // the shadow went back to the heap: the same bytes serve the next asker
-    assert_eq!(com::shadow(g2, 0, 4096), s);
     com::release(g2, 0);
 }
 
@@ -73,4 +77,33 @@ fn shadow_stable() {
     assert_eq!(com::shadow(g, 0, 8192), b);
     assert_ne!(com::shadow(g, 1, 16), b);
     com::release(g, 0);
+}
+
+static N: [Import; 2] = [("C::A", 1, nop as ImpFn), ("C::B", 1, nop as ImpFn)];
+
+#[test]
+fn reused_address_of_another_interface_gets_a_new_object() {
+    let _g = setup();
+    // an entry left behind (a surface whose texture went unseen)
+    let old = com::wrap(&M, fake(8));
+    let new = com::wrap(&N, fake(8));
+    assert_ne!(new, old);
+    assert_eq!(com::host(new), fake(8));
+    assert_eq!(com::wrap(&N, fake(8)), new);
+    com::release(new, 0);
+}
+
+#[test]
+fn children_go_with_their_parent() {
+    let _g = setup();
+    let parent = com::wrap(&M, fake(9));
+    let child = com::wrap(&M, fake(10));
+    com::adopt(child, parent);
+    com::release(child, 1);
+    com::release(parent, 0);
+    // a new object at the child's address, even of the same interface, is not the child
+    let next = com::wrap(&M, fake(10));
+    assert_ne!(next, child);
+    assert_eq!(com::host(next), fake(10));
+    com::release(next, 0);
 }
