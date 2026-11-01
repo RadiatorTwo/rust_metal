@@ -378,23 +378,32 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
         (sound_play 0x4641b0 adds at +0x20, sound_new_voice 0x465bc0 at +0xd0) changed by both.
         Rule: the main thread joins before sound_play (`tick::JOIN_FIRST`, 0-7 of 250 ticks);
         4 of 4 `check` runs then without "changed by both".
-      - Open: the light manager 0x71e7ec (Lights.cpp: used +0, active +0x80, count +0x350c;
-        alloc 0x490bf0, free 0x490d20, set active 0x490ff0, a light object's update 0x550b00
-        keeps it in step with +0xb6). One `check` run of 4: the game's assertion "!Active[Handle]"
-        (a light freed in the tick while active); none without the tick thread. Joining before
-        its methods is wrong: they run in the middle of the drawing (0x550af3, 0x550b56), and
-        after such a join the drawing called a vertex buffer the tick had released (3 of 4
-        runs). A join must be at a point where the main thread holds no pointers into the
-        world. Needs a real rule (who activates, who frees, what the original's order is).
-      - Who uses the lights (temporary `DEBUG lights` hooks in `tick.rs`, every 50 ticks):
-        the tick allocates (0x490bf0 from 0x54e9ff), creates (0x54eb40 from 0x449a86), sets
-        (0x550a90 from 0x44a289) and deletes (0x54ea60 from 0x44a0c4) lights; the main thread
-        turns them on in the drawing (0x54f080 from 0x54c97f, ~1500 per 50 ticks during a
-        tick) and also sets them every picture (0x550a90 from 0x44a289, the same caller as
-        the tick's). That run then faulted elsewhere: lists 0x72a84c (from 0x54b03a) and a
-        heap list (from 0x535f87) changed by both, then a fault in 0x535c90. The combat
-        benchmark finds more shared state than the walk did: step 5 (a rule per conflict).
-      - Next: the light rule; fingerprints of `1` against off; the bytes both changed (the
+      - Light manager 0x71e7ec (Lights.cpp: used +0, active +0x80 = LightEnable's state,
+        slot hints +0x3500..+0x350c, active count +0x3510; alloc 0x490bf0, free 0x490d20,
+        SetLight 0x490e60, set active 0x490ff0): the tick allocates, sets and frees lights; the
+        drawing selects an object's lights (0x54f080: the light objects' +0xb6, then 0x550b00
+        turns each on or off) and they stay on between pictures. Merged by bytes, a light the
+        tick freed could stay on from the drawing (the game's assertion "!Active[Handle]" at
+        the next free, 1 `check` run of 4). Joining before the light methods was wrong (they run
+        mid-drawing; afterwards the drawing used a vertex buffer the tick had released). Rule
+        now (`tick::light_free`, `light_active`): in the tick, set active and free are only
+        noted (B keeps the freed slot, so the tick does not hand it out again) and done in A at
+        the join after the merge and the Direct3D replay (`light_ops`, a guest state of its own,
+        `join_cpu`), a state A already has left out, an active light turned off before its free.
+        11 `check` missions since: no light assertion.
+      - Effect manager (CEffectManager.cpp; create by name 0x535c90, remove 0x535e80, the
+        tick's update 0x535fb0, the drawing's 0x536630; effects on an llist at +0x4c and an
+        array at +0x38, count +0xc): 1 `check` mission of 11 faulted in 0x535c90 walking the array
+        (an entry whose +0x90 was 0). Counted: the tick creates and removes effects, the drawing
+        calls 0x536630 every picture, which can remove finished ones (never seen while a tick
+        ran). Rule anyway (`tick::fx_remove`): the drawing's removals while a tick runs wait for
+        the join (`fx_removes`, a handle no longer listed left out). The fault's cause is not
+        found; not seen again in 7 missions.
+      - A/B after both rules (bench3, 2 of 3 rounds each reached the mission; the menu script
+        missed the mission in 5 of 12 runs this evening, off and `1` alike): off 131/142 fps,
+        p99 24.7/21.2 ms; `1` 131/149 fps, p99 17.8/13.7 ms. Noisy; the machine was slower than
+        on 2026-11-01 (145 off then).
+      - Next: why the menu script misses the mission; fingerprints of `1` against off; the bytes both changed (the
         tick's kept now); longer runs (cold starts, device loss, exit mid-tick).
         Left for later: the sync on the tick thread between ticks (needs marks written after
         the store, host `slice` writes re-marked after imports), steps 5-7.

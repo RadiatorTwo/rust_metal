@@ -197,6 +197,9 @@ pub fn join() -> Option<Box<Cpu>> {
     }
     pool_frees();
     replay_calls(&world::take_calls());
+    let mut jc = join_cpu(f.fcw);
+    light_ops(&mut jc);
+    fx_removes(&mut jc);
     INFLIGHT.store(false, Ordering::Release);
     if done.fcw != f.fcw {
         static ONCE: std::sync::Once = std::sync::Once::new();
@@ -400,32 +403,135 @@ fn join_first(c: &mut Cpu, i: usize) {
     call_original(c, JOIN_FIRST[i]);
 }
 
-// DEBUG lights
-const DBG_LIGHT: [u32; 6] = [0x54f080, 0x54e860, 0x54ea60, 0x550a90, 0x54eb40, 0x490bf0];
-static DBG: Mutex<std::collections::BTreeMap<(u32, u8, bool, u32), u32>> = Mutex::new(std::collections::BTreeMap::new());
-fn dbg_light(c: &mut Cpu, i: usize) {
-    let who = if world::is_tick() { 2 } else { 1 };
-    let ret = super::mem().rd32(c.r[ESP]);
-    *DBG.lock().unwrap().entry((DBG_LIGHT[i], who, inflight(), ret)).or_insert(0) += 1;
-    call_original(c, DBG_LIGHT[i]);
+// ---- the light manager --------------------------------------------------------------------
+
+/// The light manager 0x71e7ec (Lights.cpp; Direct3D's 128 light slots): used +0, active +0x80
+/// (LightEnable's state), slot hints +0x3500..+0x350c, active count +0x3510. The tick
+/// allocates (0x490bf0), sets (0x490e60) and frees (0x490d20) lights; the drawing selects an
+/// object's lights (0x54f080), turning them on and off (0x490ff0) through the light objects'
+/// +0xb6, and they stay on between pictures. With both changing the active bytes, the merge
+/// left a light freed by the tick but turned on by the drawing (the game's assertion
+/// "!Active[Handle]" at the next free). So the active bytes and the count are A's alone: in
+/// the tick, turning a light on or off and freeing it are only noted (B keeps a freed slot,
+/// so the tick does not hand it out again) and done in A at the join, in the tick's order.
+const LIGHTS: u32 = 0x71e7ec;
+pub const LIGHT_FREE: u32 = 0x490d20;
+pub const LIGHT_ACTIVE: u32 = 0x490ff0;
+/// What the tick did to a light: (handle, 0 off / 1 on / 2 freed).
+static LIGHT_OPS: Mutex<Vec<(u32, u8)>> = Mutex::new(Vec::new());
+
+/// free(handle) (thiscall, `ret 4`).
+fn light_free(c: &mut Cpu) {
+    if !world::is_tick() {
+        return call_original(c, LIGHT_FREE);
+    }
+    let h = super::mem().rd32(c.r[ESP] + 4);
+    LIGHT_OPS.lock().unwrap_or_else(|e| e.into_inner()).push((h, 2));
+    c.r[ESP] += 8;
 }
-fn dbg_dump() {
+
+/// set_active(handle, on) (thiscall, `ret 8`).
+fn light_active(c: &mut Cpu) {
+    if !world::is_tick() {
+        return call_original(c, LIGHT_ACTIVE);
+    }
+    let m = super::mem();
+    let (h, on) = (m.rd32(c.r[ESP] + 4), m.rd8(c.r[ESP] + 8) != 0);
+    LIGHT_OPS.lock().unwrap_or_else(|e| e.into_inner()).push((h, on as u8));
+    c.r[ESP] += 12;
+}
+
+/// The tick's light changes, in A (at the join, after the merge and the Direct3D replay): a
+/// change A's state already has is left out (the original asserts against it), an active light
+/// is turned off before it is freed (as the light objects' delete 0x54ea60 does).
+fn light_ops(c: &mut Cpu) {
+    let ops = std::mem::take(&mut *LIGHT_OPS.lock().unwrap_or_else(|e| e.into_inner()));
     let m = game_mem();
-    let active: Vec<u32> = (0..128).filter(|&h| m.rd8(0x71e7ec + 0x80 + h) != 0).collect();
-    let used = (0..128).filter(|&h| m.rd8(0x71e7ec + h) != 0).count();
-    let d = std::mem::take(&mut *DBG.lock().unwrap());
-    let v: Vec<String> = d.iter().map(|((f, w, i, r), n)| format!("{f:#x}/{w}/{}/{r:#x}*{n}", if *i { "fl" } else { "-" })).collect();
-    log!("DEBUG lights: used {used} active {active:?}; calls {}", v.join(" "));
+    for (h, op) in ops {
+        if h >= 0x80 || m.rd8(LIGHTS + h) == 0 {
+            continue;
+        }
+        let active = m.rd8(LIGHTS + 0x80 + h) != 0;
+        let on = op == 1;
+        if active != on && (op != 2 || active) {
+            c.r[crate::rt::ECX] = LIGHTS;
+            super::guest_call(c, LIGHT_ACTIVE, &[h, on as u32]);
+        }
+        if op == 2 {
+            c.r[crate::rt::ECX] = LIGHTS;
+            super::guest_call(c, LIGHT_FREE, &[h]);
+        }
+    }
+}
+
+// ---- the effect manager -----------------------------------------------------------------------
+
+/// CEffectManager's remove(handle) (thiscall, `ret 4`): finds the effect on the manager's
+/// llist at +0x4c (node data -> effect, its first dword the handle), takes it off the list and
+/// deletes it. The tick creates (0x535c90) and removes (0x535fb0's update) effects, the drawing
+/// (0x536630) removes finished ones: both took nodes off the list (seen: a fault in the
+/// tick's create 0x535c90 walking it). So the drawing's removals while a tick runs wait for
+/// the join (the effect stays drawn until then; a handle the tick removed meanwhile is left).
+pub const FX_REMOVE: u32 = 0x535e80;
+const FX_LIST: u32 = 0x4c;
+static FX_REMOVES: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new());
+
+fn fx_remove(c: &mut Cpu) {
+    if world::is_tick() || !inflight() {
+        return call_original(c, FX_REMOVE);
+    }
+    let e = (c.r[crate::rt::ECX], super::mem().rd32(c.r[ESP] + 4));
+    let mut g = FX_REMOVES.lock().unwrap_or_else(|e| e.into_inner());
+    if !g.contains(&e) {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| log!("tick: an effect's removal held back to the join, called from {:#x}", super::mem().rd32(c.r[ESP])));
+        g.push(e);
+    }
+    c.r[ESP] += 8;
+}
+
+/// Whether the manager's list holds an effect with this handle.
+fn fx_listed(this: u32, h: u32) -> bool {
+    let m = game_mem();
+    let (mut node, mut n) = (m.rd32(this + FX_LIST + 4), 0);
+    while node != 0 && n < 100_000 {
+        let fx = m.rd32(node);
+        if fx != 0 && m.rd32(fx) == h {
+            return true;
+        }
+        node = m.rd32(node + 4);
+        n += 1;
+    }
+    false
+}
+
+/// The drawing's removals held back while the tick ran (at the join, after the merge).
+fn fx_removes(c: &mut Cpu) {
+    let list = std::mem::take(&mut *FX_REMOVES.lock().unwrap_or_else(|e| e.into_inner()));
+    for (this, h) in list {
+        if fx_listed(this, h) {
+            c.r[crate::rt::ECX] = this;
+            super::guest_call(c, FX_REMOVE, &[h]);
+        }
+    }
+}
+
+/// A guest thread state for calls into game code at the join (its own stack, the main
+/// thread's FPU control word at the fork).
+fn join_cpu(fcw: u16) -> Cpu {
+    static STACK: OnceLock<u32> = OnceLock::new();
+    let top = *STACK.get_or_init(|| super::alloc(0x10000) + 0x10000 - 16);
+    let mut c = Cpu::new(game_mem());
+    c.r[ESP] = top;
+    c.fcw = fcw;
+    c
 }
 
 /// Hooks while the tick thread is on (`platform::hooks`).
-pub const HOOKS: [(u32, crate::rt::Hook); 14] = [
-    (DBG_LIGHT[0], |c| dbg_light(c, 0)),
-    (DBG_LIGHT[1], |c| dbg_light(c, 1)),
-    (DBG_LIGHT[2], |c| dbg_light(c, 2)),
-    (DBG_LIGHT[3], |c| dbg_light(c, 3)),
-    (DBG_LIGHT[4], |c| dbg_light(c, 4)),
-    (DBG_LIGHT[5], |c| dbg_light(c, 5)),
+pub const HOOKS: [(u32, crate::rt::Hook); 11] = [
+    (FX_REMOVE, fx_remove),
+    (LIGHT_FREE, light_free),
+    (LIGHT_ACTIVE, light_active),
     (ROUTER_DRAIN, router_drain),
     (JOIN_FIRST[0], |c| join_first(c, 0)),
     (POOL_ALLOC, pool_alloc),
@@ -468,9 +574,6 @@ fn note(synced: usize, fork: std::time::Duration, wait: std::time::Duration, joi
         for a in &m.at {
             *at.entry(*a).or_insert(0) += 1;
         }
-    }
-    if s.n % 50 == 0 {
-        dbg_dump();
     }
     if s.n == 250 {
         let n = s.n as f64;
