@@ -99,7 +99,15 @@ pub const PLACE_N: usize = 15;
 /// else's now): not interpolated.
 const JUMP: f32 = 4000.0;
 
-static IN_TICK: AtomicU32 = AtomicU32::new(0);
+thread_local! {
+    /// Depth of tick parts on this thread (the tick thread: 1 while it runs the world update).
+    static IN_TICK: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// The tick thread runs a tick part (`tick`).
+pub fn set_in_tick(n: u32) {
+    IN_TICK.set(n);
+}
 static IN_FRAME: AtomicBool = AtomicBool::new(false);
 static STEPS: Mutex<BTreeMap<u32, u32>> = Mutex::new(BTreeMap::new());
 static FRAMES: AtomicU32 = AtomicU32::new(0);
@@ -203,6 +211,7 @@ pub fn game_frame(c: &mut Cpu) {
     if ticks::on() {
         ticks::frame();
     }
+    super::tick::frame();
     IN_FRAME.store(true, Ordering::Relaxed);
     call_original(c, GAME_FRAME);
     IN_FRAME.store(false, Ordering::Relaxed);
@@ -232,7 +241,7 @@ pub fn game_frame(c: &mut Cpu) {
 
 /// How far between the last two ticks to draw (0..1), or None: not now.
 fn alpha() -> Option<f32> {
-    if !smooth() || !IN_FRAME.load(Ordering::Relaxed) || IN_TICK.load(Ordering::Relaxed) != 0 {
+    if !smooth() || !IN_FRAME.load(Ordering::Relaxed) || IN_TICK.get() != 0 {
         return None;
     }
     let m = mem();
@@ -555,7 +564,7 @@ pub fn world_to_screen(c: &mut Cpu) {
 }
 
 pub fn game_step_ms(c: &mut Cpu) {
-    if finding() && IN_TICK.load(Ordering::Relaxed) == 0 {
+    if finding() && IN_TICK.get() == 0 {
         let ret = mem().rd32(c.r[ESP]);
         *STEPS.lock().unwrap().entry(ret).or_default() += 1;
     }
@@ -564,11 +573,12 @@ pub fn game_step_ms(c: &mut Cpu) {
 
 /// The main thread is inside a tick part.
 pub fn in_tick() -> bool {
-    IN_TICK.load(Ordering::Relaxed) != 0
+    IN_TICK.get() != 0
 }
 
 fn tick_part(c: &mut Cpu, i: usize) {
-    let outer = IN_TICK.fetch_add(1, Ordering::Relaxed) == 0;
+    let outer = IN_TICK.get() == 0;
+    IN_TICK.set(IN_TICK.get() + 1);
     let aids = outer && ticks::on();
     if aids {
         ticks::part_start();
@@ -576,8 +586,11 @@ fn tick_part(c: &mut Cpu, i: usize) {
     // the world update's this (0x413c60), for the fingerprint
     let world = c.r[ECX];
     let t = (outer && frames::on()).then(frames::part_start);
-    call_original(c, TICK_PARTS[i]);
-    IN_TICK.fetch_sub(1, Ordering::Relaxed);
+    // the world update on the tick thread when it can (`tick`)
+    if !(i == TICK_PARTS.len() - 1 && super::tick::world_update(c)) {
+        call_original(c, TICK_PARTS[i]);
+    }
+    IN_TICK.set(IN_TICK.get() - 1);
     if let Some(t) = t {
         frames::part_end(i, t);
     }

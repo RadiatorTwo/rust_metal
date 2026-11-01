@@ -305,7 +305,9 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
       Resumed 2026-11-01 (the user). Step 1 done: worlds A, B, C (`platform/world.rs`) with
       a page map written by generated stores instead of write watch (cost and checks in the
       plan's step 1); off by default, no cost when off. Step 2 done (thread roles, imports per
-      role, frees held back, D3D setters recorded and replayed). Next: step 3 (`serial`).
+      role, frees held back, D3D setters recorded and replayed). Step 3 done (`serial`: the
+      world update runs in B on the tick thread, the main thread waits; same fingerprints as
+      off; fork ~0.85 ms, join ~0.16 ms). Next: step 4 (overlap, background sync).
       Step 0 of `docs/superpowers/plans/2026-10-31-tick-thread.md` (2026-10-31, `ticks.rs`,
       `GUNMETAL_TICK_PROBE`, `GUNMETAL_TICK_PRINT`, tick-indexed `GUNMETAL_INPUT` items `t<N>:`;
       report `.superpowers/perf/task-tt0-report.md`; mission 1, 651 ticks, ~14 cold runs):

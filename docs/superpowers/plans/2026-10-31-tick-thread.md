@@ -265,6 +265,21 @@ fork, `fps::IN_TICK` per thread, the tick thread in crash reports.
 
 ### Step 3: `serial` mode
 
+Done 2026-11-01 (`tick.rs`): `fps::tick_part` of P6 calls `tick::world_update`; eligible
+after 60 mission frames in a row, loader thread not running (`crash::running`), device not
+lost. Fork: `world::initial` once (then `sync`), the main stack from esp & !0xfff copied,
+frees held back, a copy of the Cpu with memory B to the tick thread (a persistent host thread,
+256 MB stack, role Tick, posing as the main thread with its TLS and last error,
+`fps::IN_TICK` now per thread). The main thread waits (turn given away), then `merge` (its
+stack below the fork's esp skipped), frees, `replay_calls`, the tick's registers back. Runs:
+mission 1 (bench script), device loss twice with Reset, blur/focus, minimise/restore, 3 cold
+starts: no fault, normal exit. Fingerprints `off` against `serial` over 1301 ticks: game time,
+camera, player, objects and `_rand` identical; the units' hash differs in 42 ticks (it
+differs between two `off` runs too, step 0). Costs per tick: fork 0.78-0.93 ms (sync ~2100
+pages: what the pictures since the last tick wrote; step 4 moves it to the tick thread), join
+0.14-0.18 ms (~870 pages copied, 6-23 merged: zero-filled heap blocks and other threads).
+Left to do by hand: an in-mission menu and leaving the mission.
+
 - [ ] The P6 hook forks; the main thread waits at once; join, replay, `world_t`; eligibility.
 - [ ] Runs: 3 scripted mission runs including `lose*2000`, blur/focus and minimise; an
       in-mission menu and leaving the mission by hand; 10 cold starts to the mission (back up

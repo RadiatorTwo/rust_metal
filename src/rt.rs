@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 /// Guest CPU state shared by all recompiled functions. Generated code keeps registers and
 /// flags in its own variables and stores them here around calls, returns and jumps out.
 #[repr(C)]
+#[derive(Clone)]
 pub struct Cpu {
     /// eax ecx edx ebx esp ebp esi edi
     pub r: [u32; 8],
@@ -42,6 +43,10 @@ pub struct Cpu {
     /// call). Set by an `Event` handler.
     pub stop: u32,
 }
+
+// `mem` points at guest memory, which lives as long as the process (the tick thread gets a
+// copy of the main thread's registers, `platform::tick`)
+unsafe impl Send for Cpu {}
 
 pub const EAX: usize = 0;
 pub const ECX: usize = 1;

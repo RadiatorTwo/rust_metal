@@ -39,6 +39,8 @@ pub enum Kind {
     Thread = 2,
     /// a timeSetEvent timer thread (its callback)
     Timer = 3,
+    /// the tick thread (`tick`: the world update in world B, as the main thread)
+    Tick = 4,
 }
 
 /// One guest thread as the report knows it (all 0: a free slot; tid 0 marks it free, since
@@ -99,6 +101,11 @@ pub fn unregister() {
         s.tib.store(0, Ordering::Relaxed);
         s.tid.store(0, Ordering::Release);
     }
+}
+
+/// Whether a guest thread started at `start` (CreateThread) is running.
+pub fn running(start: u32) -> bool {
+    THREADS.iter().any(|s| s.kind.load(Ordering::Relaxed) == Kind::Thread as u32 && s.start.load(Ordering::Relaxed) == start)
 }
 
 /// The stacks [lo, hi) of the guest threads other than the main thread.

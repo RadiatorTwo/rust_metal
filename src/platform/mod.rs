@@ -30,6 +30,7 @@ pub mod ole32;
 pub mod record;
 pub mod router;
 pub mod sample;
+pub mod tick;
 pub mod ticks;
 pub mod user32;
 pub mod video;
@@ -466,6 +467,14 @@ pub fn without_turn(wait: &mut dyn FnMut()) {
     } else {
         wait();
     }
+}
+
+/// As `without_turn`, for a wait that gives a result.
+pub fn without_turn_result<T>(wait: impl FnOnce() -> T) -> T {
+    let mut wait = Some(wait);
+    let mut out = None;
+    without_turn(&mut || out = Some((wait.take().unwrap())()));
+    out.unwrap()
 }
 
 /// At a loop head with another thread waiting: let it run first.
