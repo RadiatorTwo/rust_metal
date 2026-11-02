@@ -97,9 +97,13 @@ pub struct Objects {
     next: u32,
     /// critical sections by guest address: owner thread, recursion count
     cs: BTreeMap<u32, (u32, u32)>,
+    /// threads waiting in EnterCriticalSection: only then does a LeaveCriticalSection wake the
+    /// waiters (waking every waiting thread at each of the game's thousands of leaves a second
+    /// cost ~2 % of a mission's time)
+    cs_waiting: u32,
 }
 
-static OBJS: Mutex<Objects> = Mutex::new(Objects { map: BTreeMap::new(), next: 0x100, cs: BTreeMap::new() });
+static OBJS: Mutex<Objects> = Mutex::new(Objects { map: BTreeMap::new(), next: 0x100, cs: BTreeMap::new(), cs_waiting: 0 });
 /// notified whenever an object becomes signalled
 static SIGNAL: Condvar = Condvar::new();
 
@@ -651,7 +655,9 @@ fn enter_cs(c: &mut Cpu) -> u32 {
             e.1 += 1;
             return 0;
         }
+        g.cs_waiting += 1;
         g = wait_signal(g, None).0;
+        g.cs_waiting -= 1;
     }
 }
 
@@ -662,7 +668,9 @@ fn leave_cs(c: &mut Cpu) -> u32 {
         e.1 = e.1.saturating_sub(1);
         if e.1 == 0 {
             e.0 = 0;
-            SIGNAL.notify_all();
+            if g.cs_waiting > 0 {
+                SIGNAL.notify_all();
+            }
         }
     }
     0

@@ -92,8 +92,9 @@ fn begin(this: u32, level: u32, guest: u32, host: *mut c_void, size: usize, flag
     let (lo, hi) = (guest as u64, guest as u64 + size as u64);
     // a lock the host has not seen (null): nothing to copy from
     if lock_copy_in(flags) && !host.is_null() {
-        let open = l.open.iter().map(|l| (l.guest as u64, l.guest as u64 + l.size as u64));
-        let mut covered: Vec<(u64, u64)> = open.chain(l.kept.iter().flatten().copied()).filter(|&(a, b)| a < hi && b > lo).collect();
+        let open = l.open.iter().map(|l| (l.guest as u64, l.guest as u64 + l.size as u64)).filter(|&(a, b)| a < hi && b > lo);
+        let kept = l.kept.as_deref().map_or(&[][..], |k| overlapping(k, lo, hi));
+        let mut covered: Vec<(u64, u64)> = open.chain(kept.iter().copied()).collect();
         covered.sort_unstable();
         // the gaps between the covered ranges
         let mut at = lo;
@@ -110,18 +111,28 @@ fn begin(this: u32, level: u32, guest: u32, host: *mut c_void, size: usize, flag
     if let Some(k) = l.kept.as_mut()
         && hi > lo
     {
-        k.push((lo, hi));
-        k.sort_unstable();
-        let mut merged: Vec<(u64, u64)> = Vec::with_capacity(k.len());
-        for &(a, b) in k.iter() {
-            match merged.last_mut() {
-                Some(m) if a <= m.1 => m.1 = m.1.max(b),
-                _ => merged.push((a, b)),
-            }
-        }
-        *k = merged;
+        insert_range(k, lo, hi);
     }
     l.open.push(Locked { host: host as usize, guest, size, flags });
+}
+
+/// The ranges of `k` (sorted, disjoint) that overlap `lo..hi` (binary search: a buffer locked
+/// in many small parts holds many ranges, and it is locked hundreds of times a picture).
+fn overlapping(k: &[(u64, u64)], lo: u64, hi: u64) -> &[(u64, u64)] {
+    let s = k.partition_point(|&(_, b)| b <= lo);
+    let e = k.partition_point(|&(a, _)| a < hi).max(s);
+    &k[s..e]
+}
+
+/// Add `lo..hi` to `k` (sorted, disjoint), merged with the ranges it overlaps or touches.
+fn insert_range(k: &mut Vec<(u64, u64)>, mut lo: u64, mut hi: u64) {
+    let s = k.partition_point(|&(_, b)| b < lo);
+    let e = k.partition_point(|&(a, _)| a <= hi).max(s);
+    if s < e {
+        lo = lo.min(k[s].0);
+        hi = hi.max(k[e - 1].1);
+    }
+    k.splice(s..e, [(lo, hi)]);
 }
 
 /// End the latest lock of (`this`, `level`): its guest bytes to the host (unless read-only).
@@ -1040,4 +1051,27 @@ pub fn created(r: windows::core::HRESULT, host: *mut c_void, methods: &'static [
         mem().wr32(out, com::wrap(methods, host));
     }
     0
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::{insert_range, overlapping};
+
+    #[test]
+    fn ranges_merge_and_overlap() {
+        let mut k = Vec::new();
+        insert_range(&mut k, 10, 20);
+        insert_range(&mut k, 30, 40);
+        insert_range(&mut k, 0, 5);
+        assert_eq!(k, [(0, 5), (10, 20), (30, 40)]);
+        insert_range(&mut k, 20, 25); // touches
+        assert_eq!(k, [(0, 5), (10, 25), (30, 40)]);
+        insert_range(&mut k, 4, 31); // spans
+        assert_eq!(k, [(0, 40)]);
+        insert_range(&mut k, 50, 60);
+        assert_eq!(overlapping(&k, 40, 50), &[] as &[(u64, u64)]);
+        assert_eq!(overlapping(&k, 39, 51), [(0, 40), (50, 60)]);
+        assert_eq!(overlapping(&k, 45, 48), &[] as &[(u64, u64)]);
+        assert_eq!(overlapping(&k, 0, 1), [(0, 40)]);
+    }
 }

@@ -364,14 +364,65 @@ pass!(get_format: IDirectSoundBuffer_Vtbl, GetFormat, ptr 1, u 2, ptr 3);
 pass!(get_volume: IDirectSoundBuffer_Vtbl, GetVolume, ptr 1);
 pass!(get_pan: IDirectSoundBuffer_Vtbl, GetPan, ptr 1);
 pass!(get_frequency: IDirectSoundBuffer_Vtbl, GetFrequency, ptr 1);
-pass!(get_status: IDirectSoundBuffer_Vtbl, GetStatus, ptr 1);
-pass!(play: IDirectSoundBuffer_Vtbl, Play, u 1, u 2, u 3);
-pass!(set_current_position: IDirectSoundBuffer_Vtbl, SetCurrentPosition, u 1);
+pass!(get_status_host: IDirectSoundBuffer_Vtbl, GetStatus, ptr 1);
+pass!(play_host: IDirectSoundBuffer_Vtbl, Play, u 1, u 2, u 3);
+pass!(set_current_position_host: IDirectSoundBuffer_Vtbl, SetCurrentPosition, u 1);
+pass!(stop_host: IDirectSoundBuffer_Vtbl, Stop);
+pass!(restore_host: IDirectSoundBuffer_Vtbl, Restore);
+
+/// GetStatus answers kept per buffer (guest object) for `STATUS_KEEP`: the game asks every
+/// playing voice's status every frame (sound_listener_commit 0x466f30), tens of thousands of
+/// calls a second at a few hundred frames, ~3 % of a mission's time in dsound.dll. A voice's
+/// end is seen at most that much later (the original's 40 ms ticks saw it later still); Play,
+/// Stop, SetCurrentPosition and Restore forget the buffer's answer.
+static STATUS: Mutex<Option<HashMap<u32, (u32, std::time::Instant)>>> = Mutex::new(None);
+const STATUS_KEEP: std::time::Duration = std::time::Duration::from_millis(10);
+
+fn get_status(c: &mut Cpu) -> u32 {
+    let (this, out) = (arg(c, 0), arg(c, 1));
+    let now = std::time::Instant::now();
+    if out != 0
+        && let Some(&(s, at)) = lock(&STATUS).get_or_insert_with(HashMap::new).get(&this)
+        && now - at < STATUS_KEEP
+    {
+        mem().wr32(out, s);
+        return 0;
+    }
+    let r = get_status_host(c);
+    if r == 0 && out != 0 {
+        lock(&STATUS).get_or_insert_with(HashMap::new).insert(this, (mem().rd32(out), now));
+    }
+    r
+}
+
+fn status_forget(c: &Cpu) {
+    if let Some(m) = lock(&STATUS).as_mut() {
+        m.remove(&arg(c, 0));
+    }
+}
+
+fn play(c: &mut Cpu) -> u32 {
+    status_forget(c);
+    play_host(c)
+}
+
+fn set_current_position(c: &mut Cpu) -> u32 {
+    status_forget(c);
+    set_current_position_host(c)
+}
+
+fn stop(c: &mut Cpu) -> u32 {
+    status_forget(c);
+    stop_host(c)
+}
+
+fn restore(c: &mut Cpu) -> u32 {
+    status_forget(c);
+    restore_host(c)
+}
 pass!(set_volume: IDirectSoundBuffer_Vtbl, SetVolume, i 1);
 pass!(set_pan: IDirectSoundBuffer_Vtbl, SetPan, i 1);
 pass!(set_frequency: IDirectSoundBuffer_Vtbl, SetFrequency, u 1);
-pass!(stop: IDirectSoundBuffer_Vtbl, Stop);
-pass!(restore: IDirectSoundBuffer_Vtbl, Restore);
 
 /// IDirectSoundBuffer8 (also for IDirectSoundBuffer, its first 21 methods), in the SDK's order.
 pub static BUFFER: &[Import] = &[

@@ -165,8 +165,20 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
       - Battle now: guest code ~62 %, imports ~14 % (~11000 a picture), our import glue ~15 %.
         Biggest guest functions: material setup 0x47cb30 and 0x47db50 (~10 % together), then
         0x54a6c0 (view test), render_mesh, 0x5501a0 (node place), particles_draw.
-      - Next: 0x47cb30/0x47db50 natively with a filter for repeated state; the import glue per
-        call; flags stored before indirect calls only where read.
+      - Measured (scripted mission, own shadow per state): the game's own caches already filter
+        repeated states: of 22.8 M SetRenderState 26 k repeat, SetTextureStageState 54 k of
+        16 M, SetSamplerState 35 k of 5.8 M, SetTexture 3 k of 7 M. A filter on our side is
+        useless; 0x47cb30/0x47db50 natively would only save their own guest time.
+      - Done (sampler, scripted mission: imports 15.3 % -> 10.4-12.7 % of the samples):
+        LeaveCriticalSection woke every waiting guest thread (all waits share one condvar) at
+        each leave; now only when a thread waits in EnterCriticalSection (`cs_waiting`).
+        GetStatus answers kept 10 ms per buffer (`dsound::STATUS`; sound_listener_commit asks
+        every voice every frame; Play/Stop/SetCurrentPosition/Restore forget it): 2.7 -> 0.8 %.
+        Buffer locks' kept ranges by binary search and in-place merge (`resources::overlapping`,
+        `insert_range`; was a linear filter and a full sort per lock, 1.2 %). To be confirmed
+        by ear: sounds end and restart as before.
+      - Next: 0x47cb30/0x47db50 natively (~10 % of the samples); flags stored before indirect
+        calls only where read.
       The tick thread (below) is on hold: it adds work and race hunting for a few percent.
 - [ ] Performance, 2026-10-31 (the user: 150 fps that swing are not acceptable; aim: steady
       several hundred fps). Order now: the recompiler's code first (it speeds the tick and the
