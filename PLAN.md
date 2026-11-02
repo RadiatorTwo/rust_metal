@@ -177,8 +177,13 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
         Buffer locks' kept ranges by binary search and in-place merge (`resources::overlapping`,
         `insert_range`; was a linear filter and a full sort per lock, 1.2 %). To be confirmed
         by ear: sounds end and restart as before.
-      - Next: 0x47cb30/0x47db50 natively (~10 % of the samples); flags stored before indirect
-        calls only where read.
+      - 0x47db50 natively (`native::mat_eval`): a stack-program interpreter for material
+        parameters (46 programs in mission 1, opcodes 0-4, 6-8, 10-13, 27/28 = vertex/pixel
+        shader constants, 31, 34, 37, 39, 41, 46, 48; 27 M of 34 M calls empty). Programs with
+        other opcodes or a bad stack depth run the original. Sampler: 4-5 % -> gone, rt_hook
+        1.7 % new (the hook's entry costs, also for the empty calls). Pictures against
+        `GUNMETAL_NATIVE=0`: the same.
+      - Next: 0x47cb30 (~6 %); flags stored before indirect calls only where read.
       The tick thread (below) is on hold: it adds work and race hunting for a few percent.
 - [ ] Performance, 2026-10-31 (the user: 150 fps that swing are not acceptable; aim: steady
       several hundred fps). Order now: the recompiler's code first (it speeds the tick and the

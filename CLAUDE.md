@@ -115,7 +115,7 @@ guest shadow of the whole buffer, first part at the lock's offset, a wrapped sec
 the host's bytes copied in, the game's out at Unlock; SetNotificationPositions maps each guest event
 to a host event whose thread sets the guest one, `host_event`), `d3d9/` (Direct3D 9 passed through
 to the system's d3d9.dll, see below), `native.rs` (game functions done in Rust for speed, `GUNMETAL_NATIVE=0` runs the originals: the
-light colour at a point 0x449c60), `crt.rs` (`__ftol` hooked, its calls done inline by the lifter; the game's warning report 0x557f40
+light colour at a point 0x449c60; the material parameter interpreter 0x47db50, its programs' opcodes checked first, others run the original), `crt.rs` (`__ftol` hooked, its calls done inline by the lifter; the game's warning report 0x557f40
 goes to our log as "game: ..."), `sample.rs` (`GUNMETAL_SAMPLE=1` profiler; `=54000` starts it after 54 s), `video.rs` (the Video
 menu offers every display mode, not only up to 1600x1200; the monitor and the game's 4:3 picture are
 the back buffer's own shape: Hor+ widescreen in missions, the 4:3 menus in the middle), `crash.rs`
