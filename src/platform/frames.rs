@@ -35,7 +35,7 @@ use rustc_hash::FxHashMap as HashMap;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 static ON: AtomicBool = AtomicBool::new(false);
@@ -203,10 +203,6 @@ struct Frames {
     /// per tick part: calls, time, longest
     parts: [(u64, Duration, Duration); 7],
     tick_wall: Duration,
-    /// import calls (thunk index) by (inside a tick part, on the main thread)
-    imports: HashMap<(bool, bool, usize), u64>,
-    /// main-thread import calls outside ticks since the last 2 s summary, by thunk
-    window_calls: HashMap<usize, u64>,
     since_probe: u32,
     probe: Option<Probe>,
     /// page probes are on (`GUNMETAL_FRAMES_PAGES=1`)
@@ -330,8 +326,6 @@ pub fn init(sections: Vec<(String, u32, u32)>) {
         total_ticks: 0,
         parts: Default::default(),
         tick_wall: Duration::ZERO,
-        imports: HashMap::default(),
-        window_calls: HashMap::default(),
         since_probe: 0,
         probe: None,
         probes: std::env::var_os("GUNMETAL_FRAMES_PAGES").is_some_and(|v| v != "0"),
@@ -539,15 +533,24 @@ pub fn part_end(i: usize, t: Instant) {
 }
 
 /// An import (thunk `k`) is called on this thread; `in_tick`: the main thread is in a tick part.
+/// Counted without `FRAMES`'s lock (every import of every thread passes here).
 pub fn import(k: usize, in_tick: bool) {
     let main = MAIN.get();
-    with(|s| {
-        *s.imports.entry((in_tick, main, k)).or_default() += 1;
-        if main && !in_tick {
-            *s.window_calls.entry(k).or_default() += 1;
+    if let Some(c) = IMPORTS[in_tick as usize * 2 + main as usize].get(k) {
+        c.fetch_add(1, Ordering::Relaxed);
+    }
+    if main && !in_tick {
+        if let Some(c) = WINDOW_CALLS.get(k) {
+            c.fetch_add(1, Ordering::Relaxed);
         }
-    });
+    }
 }
+
+const THUNKS: usize = super::THUNK_N as usize;
+/// Import calls by thunk, in 4 arrays by (inside a tick part) * 2 + (on the main thread).
+static IMPORTS: [[AtomicU64; THUNKS]; 4] = [const { [const { AtomicU64::new(0) }; THUNKS] }; 4];
+/// Main-thread import calls outside ticks since the last 2 s summary, by thunk.
+static WINDOW_CALLS: [AtomicU64; THUNKS] = [const { AtomicU64::new(0) }; THUNKS];
 
 /// A time stamp for timing an import (the TSC: far cheaper than `Instant::now`, which the
 /// ~10000 imports of a picture would pay twice each).
@@ -664,7 +667,8 @@ pub fn after_present() {
         let start = s.pictures.get(s.window).map(|p| p.at);
         if start.is_some_and(|t| call - t >= Duration::from_secs(2)) {
             let n = (s.pictures.len() - s.window).max(1) as f64;
-            let mut calls: Vec<(usize, u64)> = s.window_calls.drain().collect();
+            let mut calls: Vec<(usize, u64)> =
+                WINDOW_CALLS.iter().enumerate().map(|(k, c)| (k, c.swap(0, Ordering::Relaxed))).filter(|c| c.1 != 0).collect();
             calls.sort_unstable_by(|a, b| b.1.cmp(&a.1));
             let top: Vec<String> =
                 calls.iter().take(10).map(|&(k, c)| format!("{} {:.0}", super::thunk_name(k), c as f64 / n)).collect();
@@ -765,7 +769,9 @@ pub fn finish() {
     let ticks = s.total_ticks.max(1) as f64;
     let pictures = s.pictures.len().max(1) as f64;
     let list = |in_tick: bool, main: bool, per: f64| {
-        let mut v: Vec<(String, u64)> = s.imports.iter().filter(|e| e.0.0 == in_tick && e.0.1 == main).map(|e| (names(e.0.2), *e.1)).collect();
+        let counts = &IMPORTS[in_tick as usize * 2 + main as usize];
+        let mut v: Vec<(String, u64)> =
+            counts.iter().enumerate().map(|(k, c)| (k, c.load(Ordering::Relaxed))).filter(|c| c.1 != 0).map(|(k, c)| (names(k), c)).collect();
         v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         v.iter().map(|(n, k)| format!("{n} {k} ({:.2})", *k as f64 / per)).collect::<Vec<_>>().join(", ")
     };

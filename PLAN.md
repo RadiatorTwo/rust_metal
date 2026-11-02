@@ -192,8 +192,15 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
         with `rep movsd`). `rt_string` 3.9 -> 1.8 %, base 3.67 -> 3.64 ms, looking away 3.76
         -> 3.72 ms (one run each). The rest: long copies, lods/scas/cmps or backwards, not
         looked at.
-      - Next: the sampler's "init_tib" (4.1 %; it does not run in a mission: some host code of
-        ours under the wrong symbol); flags stored before indirect calls only where read.
+      - The sampler's "init_tib" (4.1 %) was the import call path (`platform/mod.rs`, inlined,
+        no symbol of its own), mostly `GUNMETAL_FRAMES`'s own counting: a mutex and two hash
+        map entries per import (`frames.rs` import, 2.8 %; now atomic counters per thunk) and
+        two TSC reads (`frames::stamp`, ~2 %, kept). So it cost the measured runs, not real
+        play: replays now show base 3.57 ms (was 3.64-3.72). `GUNMETAL_SAMPLE_LINES=1` names
+        our code by source line (needs a build with
+        `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`); left there: the interpolation's grid
+        search (`fps.rs` `any`, ~1 %).
+      - Next: flags stored before indirect calls only where read; particles_draw (6 %).
       The tick thread (below) is on hold: it adds work and race hunting for a few percent.
 - [ ] Performance, 2026-10-31 (the user: 150 fps that swing are not acceptable; aim: steady
       several hundred fps). Order now: the recompiler's code first (it speeds the tick and the

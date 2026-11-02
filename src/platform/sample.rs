@@ -170,7 +170,26 @@ fn symbol(a: usize) -> String {
                 return format!("{a:#x} ({})", std::io::Error::last_os_error());
             }
             let name = std::slice::from_raw_parts((*info).Name.as_ptr(), (*info).NameLen as usize);
-            String::from_utf16_lossy(name)
+            let name = String::from_utf16_lossy(name);
+            // past the symbol's end: code without a symbol of its own (the PDB's nearest one
+            // before it is a wrong name); say where it is instead
+            if std::env::var_os("GUNMETAL_SAMPLE_LINES").is_some() || ((*info).Size != 0 && disp >= (*info).Size as u64) {
+                use windows_sys::Win32::System::Diagnostics::Debug::{IMAGEHLP_LINEW64, SymGetLineFromAddrW64};
+                let mut line: IMAGEHLP_LINEW64 = std::mem::zeroed();
+                line.SizeOfStruct = size_of::<IMAGEHLP_LINEW64>() as u32;
+                let mut d = 0u32;
+                let base = (*info).ModBase as usize;
+                if SymGetLineFromAddrW64(GetCurrentProcess(), a as u64, &mut d, &mut line) != 0 {
+                    let mut n = 0;
+                    while *line.FileName.add(n) != 0 {
+                        n += 1;
+                    }
+                    let file = String::from_utf16_lossy(std::slice::from_raw_parts(line.FileName, n));
+                    return format!("{}:{}", file.rsplit('\\').next().unwrap_or("?"), line.LineNumber);
+                }
+                return format!("rva {:#x} (after {name} +{disp:#x})", a - base);
+            }
+            name
         })
         .clone()
 }
