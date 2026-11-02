@@ -63,7 +63,8 @@
 
 use super::{advapi32, frames, guest_call, log, mem, ticks};
 use crate::rt::{Cpu, ECX, ESP, call_original};
-use std::collections::{BTreeMap, HashMap};
+use rustc_hash::FxHashMap as HashMap;
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -125,6 +126,78 @@ struct Track {
     first: u32,
     /// the frame it was last drawn in
     frame: u32,
+    /// for many places (grass, units drawn through one node, ~1500 in a battle): `cur`'s index
+    /// by value, and grids of `prev` and of `cur`'s usable places, so that finding a place's
+    /// partner does not walk the lists (walking them made a frame's matching quadratic)
+    cur_ix: Option<HashMap<[u32; PLACE_N], usize>>,
+    prev_grid: Option<Grid>,
+    cur_grid: Option<Grid>,
+}
+
+/// From this many places on, a track keeps an index and grids.
+const MANY: usize = 32;
+
+/// Places by the cube of side `CELL` their position lies in.
+#[derive(Default)]
+pub struct Grid(HashMap<(i32, i32, i32), Vec<u32>>);
+
+const CELL: f32 = 512.0;
+
+impl Grid {
+    fn cell(p: &[f32; PLACE_N]) -> (i32, i32, i32) {
+        let c = |v: f32| (v / CELL).floor().clamp(-1e9, 1e9) as i32;
+        (c(p[ROT]), c(p[ROT + 1]), c(p[ROT + 2]))
+    }
+
+    pub fn insert(&mut self, i: usize, p: &[f32; PLACE_N]) {
+        self.0.entry(Self::cell(p)).or_default().push(i as u32);
+    }
+
+    /// The indices in the cells at Chebyshev distance `r` from `c`.
+    fn shell(&self, c: (i32, i32, i32), r: i32, mut f: impl FnMut(usize) -> bool) -> bool {
+        for x in -r..=r {
+            for y in -r..=r {
+                for z in -r..=r {
+                    if x.abs().max(y.abs()).max(z.abs()) != r {
+                        continue;
+                    }
+                    if let Some(v) = self.0.get(&(c.0 + x, c.1 + y, c.2 + z)) {
+                        if v.iter().any(|&i| f(i as usize)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// The nearest of `set` (as `nearest`), if it is nearer than `max`.
+    pub fn nearest(&self, set: &[[f32; PLACE_N]], p: &[f32; PLACE_N], max: f32) -> Option<(usize, f32)> {
+        let c = Self::cell(p);
+        let mut best: Option<(usize, f32)> = None;
+        for r in 0..=(max / CELL).ceil() as i32 + 1 {
+            // everything in shells beyond r is at least r * CELL away
+            if best.is_some_and(|b| b.1 <= (r as f32 * CELL - CELL).max(0.0).powi(2)) {
+                break;
+            }
+            self.shell(c, r, |i| {
+                let d = dist2(p, &set[i]);
+                if best.is_none_or(|b| d < b.1 || (d == b.1 && i < b.0)) {
+                    best = Some((i, d));
+                }
+                false
+            });
+        }
+        best.filter(|b| b.1.sqrt() < max)
+    }
+
+    /// Whether a usable place of `cur` other than `now` is nearer to `p` than `back`.
+    fn any_nearer(&self, cur: &[([f32; PLACE_N], bool)], p: &[f32; PLACE_N], back: f32, now: &[f32; PLACE_N]) -> bool {
+        let c = Self::cell(p);
+        let reach = (back.sqrt() / CELL).ceil() as i32 + 1;
+        (0..=reach).any(|r| self.shell(c, r, |i| cur[i].1 && cur[i].0 != *now && dist2(p, &cur[i].0) < back))
+    }
 }
 
 /// At most this many places per address and tick.
@@ -293,6 +366,15 @@ fn place(key: u32, now: &[f32; PLACE_N], n: usize, alpha: f32) -> Option<[f32; P
     if tr.cur_t != t {
         // a new tick: this tick's places become the tick before's
         tr.prev = tr.cur.drain(..).filter(|c| c.1).map(|c| c.0).collect();
+        tr.prev_grid = (tr.prev.len() >= MANY).then(|| {
+            let mut g = Grid::default();
+            for (i, p) in tr.prev.iter().enumerate() {
+                g.insert(i, p);
+            }
+            g
+        });
+        tr.cur_ix = None;
+        tr.cur_grid = None;
         tr.prev_t = tr.cur_t;
         tr.cur_t = t;
         tr.first = frame;
@@ -302,12 +384,34 @@ fn place(key: u32, now: &[f32; PLACE_N], n: usize, alpha: f32) -> Option<[f32; P
     let mut now_n = [0.0; PLACE_N];
     now_n[..n].copy_from_slice(&now[..n]);
     let first_frame = tr.first == frame;
-    let known = tr.cur.iter().position(|c| c.0 == now_n);
+    let bits = now_n.map(f32::to_bits);
+    let known = match &tr.cur_ix {
+        Some(ix) => ix.get(&bits).copied(),
+        None => tr.cur.iter().position(|c| c.0 == now_n),
+    };
     let usable = match known {
         Some(k) => tr.cur[k].1,
         None => {
             if tr.cur.len() < MAX_PLACES {
+                let i = tr.cur.len();
                 tr.cur.push((now_n, first_frame));
+                if let Some(ix) = &mut tr.cur_ix {
+                    ix.entry(bits).or_insert(i);
+                    if first_frame {
+                        tr.cur_grid.get_or_insert_with(Grid::default).insert(i, &now_n);
+                    }
+                } else if tr.cur.len() >= MANY {
+                    let mut ix = HashMap::default();
+                    let mut g = Grid::default();
+                    for (k, c) in tr.cur.iter().enumerate() {
+                        ix.entry(c.0.map(f32::to_bits)).or_insert(k);
+                        if c.1 {
+                            g.insert(k, &c.0);
+                        }
+                    }
+                    tr.cur_ix = Some(ix);
+                    tr.cur_grid = Some(g);
+                }
             }
             first_frame
         }
@@ -315,7 +419,24 @@ fn place(key: u32, now: &[f32; PLACE_N], n: usize, alpha: f32) -> Option<[f32; P
     if !usable || tr.prev_t.wrapping_add(step) != tr.cur_t {
         return None;
     }
-    let prev = partner(&tr.prev, &tr.cur, &now_n)?;
+    let prev = if tr.prev_grid.is_none() && tr.cur_grid.is_none() {
+        partner(&tr.prev, &tr.cur, &now_n)?
+    } else {
+        // as `partner`, through the grids where there are many places
+        let (i, d) = match &tr.prev_grid {
+            Some(g) => g.nearest(&tr.prev, &now_n, JUMP)?,
+            None => nearest(&now_n, tr.prev.iter()).filter(|n| n.1.sqrt() < JUMP)?,
+        };
+        let p = tr.prev[i];
+        let taken = match &tr.cur_grid {
+            Some(g) => g.any_nearer(&tr.cur, &p, d, &now_n),
+            None => tr.cur.iter().filter(|c| c.1 && c.0 != now_n).any(|c| dist2(&p, &c.0) < d),
+        };
+        if taken {
+            return None;
+        }
+        p
+    };
     let mut prev_full = *now;
     prev_full[..n].copy_from_slice(&prev[..n]);
     Some(blend(&prev_full, now, n, alpha))
@@ -541,7 +662,7 @@ pub fn crosshair_draw(c: &mut Cpu) {
     let host = super::kernel32::start_time().elapsed().as_secs_f64() * 1000.0;
     let dt = {
         let mut g = CROSSHAIR_LAST.lock().unwrap();
-        let last = g.get_or_insert_with(HashMap::new).insert((this, ret), host);
+        let last = g.get_or_insert_with(HashMap::default).insert((this, ret), host);
         last.map_or(CROSSHAIR_HALF, |t| (host - t).min(1000.0))
     };
     let mut target = [0.0f32; 3];

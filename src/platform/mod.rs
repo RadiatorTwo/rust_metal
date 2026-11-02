@@ -26,6 +26,7 @@ pub mod kernel32;
 pub mod mf;
 #[cfg(windows)]
 pub mod music;
+pub mod native;
 pub mod ole32;
 pub mod record;
 pub mod router;
@@ -594,7 +595,8 @@ fn on_event(c: &mut Cpu, e: Event) {
             if frames::on() {
                 frames::import(k, fps::in_tick());
             }
-            let t0 = (prof() || frames::on()).then(std::time::Instant::now);
+            let t0 = prof().then(std::time::Instant::now);
+            let s0 = frames::on().then(frames::stamp);
             // recorded Direct3D calls are short: they keep the turn (`d3d9::queue`)
             let keep = queued && d3d9::queue::global().is_some();
             if !keep {
@@ -611,10 +613,8 @@ fn on_event(c: &mut Cpu, e: Event) {
             }
             sample::IN_IMPORT.store(0, Ordering::Relaxed);
             let t1 = t0.map(|_| std::time::Instant::now());
-            if let (Some(t0), Some(t1)) = (t0, t1) {
-                if frames::on() {
-                    frames::import_done(k, t1 - t0);
-                }
+            if let Some(s0) = s0 {
+                frames::import_done(k, frames::stamp().wrapping_sub(s0));
             }
             if !keep {
                 turn_take();
@@ -1038,7 +1038,7 @@ pub fn hooks() -> Vec<(u32, crate::rt::Hook)> {
 
 /// Game functions replaced by our own (`jit::compile`).
 pub const HOOKS: &[(u32, crate::rt::Hook)] = &{
-    const N: usize = 3 + fps::HOOKS.len() + video::HOOKS.len() + hud::HOOKS.len() + router::HOOKS.len();
+    const N: usize = 3 + fps::HOOKS.len() + video::HOOKS.len() + hud::HOOKS.len() + router::HOOKS.len() + native::HOOKS.len();
     let mut h: [(u32, crate::rt::Hook); N] = [(crt::FTOL, crt::ftol); N];
     h[1] = (crt::GAME_WARNING, crt::game_warning);
     h[2] = (crash::AMSG_EXIT, crash::amsg_exit);
@@ -1064,6 +1064,12 @@ pub const HOOKS: &[(u32, crate::rt::Hook)] = &{
     let mut i = 0;
     while i < router::HOOKS.len() {
         h[n] = router::HOOKS[i];
+        n += 1;
+        i += 1;
+    }
+    let mut i = 0;
+    while i < native::HOOKS.len() {
+        h[n] = native::HOOKS[i];
         n += 1;
         i += 1;
     }
@@ -1152,18 +1158,26 @@ pub fn run_game(game: &crate::game::Game, game_dir: PathBuf) -> u32 {
         });
     }
     if let Some(path) = rt::count_file() {
-        // calls per function, every second: "second address calls [name]" lines
+        // per function, every second: "second address calls instructions [name]" lines
         std::thread::spawn(move || {
             use std::io::Write;
             let mut out = std::io::BufWriter::new(std::fs::File::create(path).expect("GUNMETAL_COUNT file"));
+            let mut last: std::collections::HashMap<u32, (u32, u64)> = std::collections::HashMap::new();
             for sec in 1.. {
                 std::thread::sleep(std::time::Duration::from_secs(1));
-                let mut counts: Vec<(u32, u32)> = lock(&rt::COUNTS).iter().map(|&(a, n)| (a, n.swap(0, Ordering::Relaxed))).collect();
+                let mut counts: Vec<(u32, u32, u64)> = lock(&rt::COUNTS)
+                    .iter()
+                    .map(|&(a, n)| {
+                        let now = (n.0.load(Ordering::Relaxed), n.1.load(Ordering::Relaxed));
+                        let was = last.insert(a, now).unwrap_or((0, 0));
+                        (a, now.0.wrapping_sub(was.0), now.1.wrapping_sub(was.1))
+                    })
+                    .collect();
                 counts.sort_unstable();
-                for (a, n) in counts {
-                    if n != 0 {
+                for (a, n, i) in counts {
+                    if n != 0 || i != 0 {
                         let name = crate::image::symbols().get(&a).map_or("", |n| n.as_str());
-                        let _ = writeln!(out, "{sec} {a:x} {n} {name}");
+                        let _ = writeln!(out, "{sec} {a:x} {n} {i} {name}");
                     }
                 }
                 let _ = out.flush();

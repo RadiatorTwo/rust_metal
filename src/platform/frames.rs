@@ -31,7 +31,8 @@
 //! Without `GUNMETAL_FRAMES` everything here is one relaxed load per call (`on`).
 
 use super::{lock, log, mem};
-use std::collections::{BTreeMap, HashMap};
+use rustc_hash::FxHashMap as HashMap;
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -204,6 +205,8 @@ struct Frames {
     tick_wall: Duration,
     /// import calls (thunk index) by (inside a tick part, on the main thread)
     imports: HashMap<(bool, bool, usize), u64>,
+    /// main-thread import calls outside ticks since the last 2 s summary, by thunk
+    window_calls: HashMap<usize, u64>,
     since_probe: u32,
     probe: Option<Probe>,
     /// page probes are on (`GUNMETAL_FRAMES_PAGES=1`)
@@ -257,14 +260,15 @@ const COLUMNS: &str = "present_ms interval_ms produce_ms present_call_ms ticks t
 
 #[derive(Default)]
 struct Detail {
-    imports: Duration,
+    /// TSC ticks (`stamp`)
+    imports: u64,
     calls: u32,
     wait: Duration,
     waits: u32,
     /// other threads' time with the turn, by start address
     held: Vec<(u32, Duration)>,
-    /// by thunk: time
-    by_import: HashMap<usize, Duration>,
+    /// by thunk: TSC ticks
+    by_import: HashMap<usize, u64>,
     clear: Duration,
 }
 
@@ -326,7 +330,8 @@ pub fn init(sections: Vec<(String, u32, u32)>) {
         total_ticks: 0,
         parts: Default::default(),
         tick_wall: Duration::ZERO,
-        imports: HashMap::new(),
+        imports: HashMap::default(),
+        window_calls: HashMap::default(),
         since_probe: 0,
         probe: None,
         probes: std::env::var_os("GUNMETAL_FRAMES_PAGES").is_some_and(|v| v != "0"),
@@ -536,11 +541,23 @@ pub fn part_end(i: usize, t: Instant) {
 /// An import (thunk `k`) is called on this thread; `in_tick`: the main thread is in a tick part.
 pub fn import(k: usize, in_tick: bool) {
     let main = MAIN.get();
-    with(|s| *s.imports.entry((in_tick, main, k)).or_default() += 1);
+    with(|s| {
+        *s.imports.entry((in_tick, main, k)).or_default() += 1;
+        if main && !in_tick {
+            *s.window_calls.entry(k).or_default() += 1;
+        }
+    });
 }
 
-/// Import `k` returned after `d` (its own time, without the wait for the turn after it).
-pub fn import_done(k: usize, d: Duration) {
+/// A time stamp for timing an import (the TSC: far cheaper than `Instant::now`, which the
+/// ~10000 imports of a picture would pay twice each).
+pub fn stamp() -> u64 {
+    tsc()
+}
+
+/// Import `k` returned `d` TSC ticks (`stamp`) after its call (its own time, without the wait
+/// for the turn after it).
+pub fn import_done(k: usize, d: u64) {
     if !MAIN.get() {
         return;
     }
@@ -599,14 +616,15 @@ pub fn after_present() {
         let disturbed = probed || s.after_probe;
         s.after_probe = probed;
         let d = std::mem::take(&mut s.detail);
+        let tsc_per_ms = tsc().wrapping_sub(s.tsc0.0) as f64 / ms(s.tsc0.1.elapsed()).max(1e-9);
+        let tick_ms = |t: u64| t as f64 / tsc_per_ms;
         let others: Duration = d.held.iter().map(|h| h.1).sum();
         let holder = d.held.iter().max_by_key(|h| h.1).map_or("-".to_string(), |h| format!("{:#x}:{:.2}", h.0, ms(h.1)));
         let top = d
             .by_import
             .iter()
             .max_by_key(|e| *e.1)
-            .map_or("-".to_string(), |(&k, &t)| format!("{}:{:.2}", super::thunk_name(k).replace(' ', "_"), ms(t)));
-        let tsc_per_ms = tsc().wrapping_sub(s.tsc0.0) as f64 / ms(s.tsc0.1.elapsed()).max(1e-9);
+            .map_or("-".to_string(), |(&k, &t)| format!("{}:{:.2}", super::thunk_name(k).replace(' ', "_"), tick_ms(t)));
         let _ = writeln!(
             s.out,
             "{:.3} {interval:.3} {produce:.3} {:.3} {} {:.3} {} {} {:.3} {} {:.3} {} {:.3} {holder} {top} {:.3} {} {:.3} {p6:.3} {draw:.3}",
@@ -616,7 +634,7 @@ pub fn after_present() {
             ms(s.tick_time),
             s.frame_mission as u8,
             disturbed as u8,
-            ms(d.imports),
+            tick_ms(d.imports),
             d.calls,
             ms(d.wait),
             d.waits,
@@ -645,13 +663,19 @@ pub fn after_present() {
         }
         let start = s.pictures.get(s.window).map(|p| p.at);
         if start.is_some_and(|t| call - t >= Duration::from_secs(2)) {
-            summary = Some(window_summary(&s.pictures[s.window..]));
+            let n = (s.pictures.len() - s.window).max(1) as f64;
+            let mut calls: Vec<(usize, u64)> = s.window_calls.drain().collect();
+            calls.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+            let top: Vec<String> =
+                calls.iter().take(10).map(|&(k, c)| format!("{} {:.0}", super::thunk_name(k), c as f64 / n)).collect();
+            summary = Some((window_summary(&s.pictures[s.window..]), top.join(", ")));
             s.window = s.pictures.len();
             let _ = s.out.flush();
         }
     });
-    if let Some(sm) = summary {
+    if let Some((sm, top)) = summary {
         log!("frames: 2 s: {}", show_summary(&sm));
+        log!("frames: calls per picture: {top}");
     }
 }
 

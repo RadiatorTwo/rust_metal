@@ -727,7 +727,7 @@ impl<'a, 'f> Lifter<'a, 'f> {
         }
         if crate::rt::count_file().is_some() {
             let ptr = self.cfg.pointer_type();
-            let at = self.b.ins().iconst(ptr, crate::rt::counter(self.f.entry) as *const _ as i64);
+            let at = self.b.ins().iconst(ptr, &crate::rt::counter(self.f.entry).0 as *const _ as i64);
             let n = self.b.ins().load(I32, mf(), at, 0);
             let n = self.b.ins().iadd_imm_u(n, 1);
             self.b.ins().store(mf(), n, at, 0);
@@ -753,6 +753,14 @@ impl<'a, 'f> Lifter<'a, 'f> {
             // only the instruction right after a compare, reached from nowhere else
             if self.fused.is_some_and(|f| f.at != a || a == self.f.entry || self.f.targets.contains(&a)) {
                 self.fused = None;
+            }
+            if crate::rt::count_file().is_some() {
+                // guest instructions executed by this function (`rt::counter`)
+                let ptr = self.cfg.pointer_type();
+                let at = self.b.ins().iconst(ptr, &crate::rt::counter(self.f.entry).1 as *const _ as i64);
+                let n = self.b.ins().load(I64, mf(), at, 0);
+                let n = self.b.ins().iadd_imm_u(n, 1);
+                self.b.ins().store(mf(), n, at, 0);
             }
             let was = self.fused;
             self.emit(&i);

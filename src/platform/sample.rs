@@ -79,7 +79,14 @@ pub fn start() {
             if t.elapsed().as_secs() >= 2 {
                 let mut v: Vec<_> = counts.drain().collect();
                 v.sort_by_key(|e| std::cmp::Reverse(e.1));
-                log!("sample: {total} samples");
+                let part = |p: &str| 100.0 * v.iter().filter(|e| e.0.starts_with(p)).map(|e| e.1).sum::<u32>() as f64 / total as f64;
+                log!(
+                    "sample: {total} samples; guest {:.1}%, imports {:.1}%, host helpers {:.1}%, host other {:.1}%",
+                    part("guest"),
+                    part("import"),
+                    part("host ") - part("host other"),
+                    part("host other")
+                );
                 for (k, n) in v.iter().take(25) {
                     log!("sample: {:5.1}% {k}", 100.0 * *n as f64 / total as f64);
                 }
@@ -113,6 +120,10 @@ fn outside(rip: usize, rsp: usize) -> String {
         let nt = base + *((base + 0x3c) as *const u32) as usize;
         (base, base + *((nt + 0x50) as *const u32) as usize)
     };
+    if (lo..hi).contains(&rip) {
+        // in our own code: the function itself
+        return format!("[ours] {}", symbol(rip));
+    }
     let mut ours = Vec::new();
     for k in 0..2048 {
         let v = unsafe { *((rsp + 8 * k) as *const usize) };

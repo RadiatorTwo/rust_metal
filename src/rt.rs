@@ -319,17 +319,20 @@ pub extern "C" fn rt_lookup(cpu: *mut Cpu, addr: u32) -> *const u8 {
 /// at loop heads and calls `rt_yield`, so a thread spinning on a flag lets the others run.
 pub static POLL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-/// `GUNMETAL_COUNT=<file>`: every function entry counts its calls (function address, counter);
-/// the platform layer writes them to the file every second.
-pub static COUNTS: std::sync::Mutex<Vec<(u32, &'static std::sync::atomic::AtomicU32)>> = std::sync::Mutex::new(Vec::new());
+/// `GUNMETAL_COUNT=<file>`: every function entry counts its calls and every instruction its
+/// function's executed instructions (function address, calls, instructions); the platform layer
+/// writes them to the file every second. The generated code adds without a lock: the writer
+/// reads and never resets.
+pub type Counter = (std::sync::atomic::AtomicU32, std::sync::atomic::AtomicU64);
+pub static COUNTS: std::sync::Mutex<Vec<(u32, &'static Counter)>> = std::sync::Mutex::new(Vec::new());
 
-/// The call counter of the function at `addr` (made on first use).
-pub fn counter(addr: u32) -> &'static std::sync::atomic::AtomicU32 {
+/// The counters of the function at `addr` (made on first use).
+pub fn counter(addr: u32) -> &'static Counter {
     let mut c = COUNTS.lock().unwrap();
     if let Some(&(_, n)) = c.iter().find(|e| e.0 == addr) {
         return n;
     }
-    let n = Box::leak(Box::new(std::sync::atomic::AtomicU32::new(0)));
+    let n: &'static Counter = Box::leak(Box::new(Default::default()));
     c.push((addr, n));
     n
 }

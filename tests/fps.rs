@@ -92,3 +92,35 @@ fn crosshair_share_is_by_time() {
     assert!((1.0 - (1.0 - s) * (1.0 - s) - 0.5).abs() < 1e-6);
     assert_eq!(crosshair_share(0.0), 0.0);
 }
+
+#[test]
+fn the_grid_finds_the_nearest_place_as_a_walk_does() {
+    use rust_metal::platform::fps::{Grid, PLACE_N};
+    // a fixed pseudo-random cloud with clusters and duplicates
+    let mut x = 12345u32;
+    let mut rnd = || {
+        x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+        (x >> 8) as f32 / (1 << 24) as f32
+    };
+    let place = |v: [f32; 3]| {
+        let mut p = [0.0; PLACE_N];
+        p[9..12].copy_from_slice(&v);
+        p
+    };
+    let mut set = Vec::new();
+    for k in 0..600 {
+        let s = if k % 3 == 0 { 20000.0 } else { 900.0 };
+        set.push(place([rnd() * s - s / 2.0, rnd() * s - s / 2.0, rnd() * 50.0]));
+    }
+    set.push(set[5]);
+    let mut g = Grid::default();
+    for (i, p) in set.iter().enumerate() {
+        g.insert(i, p);
+    }
+    let d2 = |a: &[f32; PLACE_N], b: &[f32; PLACE_N]| (9..12).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>();
+    for _ in 0..500 {
+        let q = place([rnd() * 24000.0 - 12000.0, rnd() * 24000.0 - 12000.0, rnd() * 60.0]);
+        let walk = set.iter().enumerate().map(|(i, p)| (i, d2(&q, p))).min_by(|a, b| a.1.total_cmp(&b.1)).filter(|b| b.1.sqrt() < 4000.0);
+        assert_eq!(g.nearest(&set, &q, 4000.0), walk);
+    }
+}

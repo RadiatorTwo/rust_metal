@@ -146,6 +146,28 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
       the same (seen: the view matrix changes only at a tick). Per drawn frame only 0x44d9f0 gets
       the 40 ms step (`GUNMETAL_STEPS=1`; envelopes of a list at 0x661d6c whose results are not
       stored, probably Xbox rumble: harmless).
+- [ ] Performance, 2026-11-02 (the user: forget the original's exactness, make it fast; no more
+      benchmark series: one replayed recording per change). Findings with the user's recordings
+      (`look.txt`: a base of many static parts, `anim.txt`: a battle; 2560x1440; not kept):
+      - The drop is per drawn part: ~2.9 ms per 1000 parts (base 870 draws, battle ~1580, quiet
+        ~340). The game runs ~5000 x86 instructions per part (9.0 M per picture in the battle,
+        4.6 M quiet; `GUNMETAL_COUNT` now counts instructions per function).
+      - Instructions are not time: the light colour function 0x449c60 (8 % of the instructions)
+        done natively (`native.rs`) saved only 1 %; tight x87 loops already run fast. The FPU's
+        24-bit rounding costs nothing measurable (the precision left at 53 bits: same time).
+      - The sampler (now with category totals and our own functions by symbol) found 35 % of the
+        battle in our host code: the interpolation's matching walked a list of up to ~1400
+        places per address on every call (quadratic; fixed with grids, `fps::Grid`), SipHash in
+        its maps (Fx hash now), and `Instant::now` twice per import in `GUNMETAL_FRAMES` (TSC
+        now). Battle 6.61 -> 4.83 ms per picture, base 4.12 -> 3.33, quiet 2.99 -> 2.34. The
+        user played it: everything right.
+      - Tried and dropped: short imports keeping the guest turn (no measurable change).
+      - Battle now: guest code ~62 %, imports ~14 % (~11000 a picture), our import glue ~15 %.
+        Biggest guest functions: material setup 0x47cb30 and 0x47db50 (~10 % together), then
+        0x54a6c0 (view test), render_mesh, 0x5501a0 (node place), particles_draw.
+      - Next: 0x47cb30/0x47db50 natively with a filter for repeated state; the import glue per
+        call; flags stored before indirect calls only where read.
+      The tick thread (below) is on hold: it adds work and race hunting for a few percent.
 - [ ] Performance, 2026-10-31 (the user: 150 fps that swing are not acceptable; aim: steady
       several hundred fps). Order now: the recompiler's code first (it speeds the tick and the
       drawing alike), then measure again; the tick thread (design (a), below) is on hold.

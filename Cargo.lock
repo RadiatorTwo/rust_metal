@@ -1321,6 +1321,7 @@ dependencies = [
  "iced-x86",
  "libc",
  "mimalloc",
+ "rustc-hash",
  "sha2",
  "windows",
  "windows-sys 0.61.2",

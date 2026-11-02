@@ -114,7 +114,8 @@ DSBUFFERDESC's format pointer points at the game's WAVEFORMATEX in place; Lock g
 guest shadow of the whole buffer, first part at the lock's offset, a wrapped second at its start,
 the host's bytes copied in, the game's out at Unlock; SetNotificationPositions maps each guest event
 to a host event whose thread sets the guest one, `host_event`), `d3d9/` (Direct3D 9 passed through
-to the system's d3d9.dll, see below), `crt.rs` (`__ftol` hooked, its calls done inline by the lifter; the game's warning report 0x557f40
+to the system's d3d9.dll, see below), `native.rs` (game functions done in Rust for speed, `GUNMETAL_NATIVE=0` runs the originals: the
+light colour at a point 0x449c60), `crt.rs` (`__ftol` hooked, its calls done inline by the lifter; the game's warning report 0x557f40
 goes to our log as "game: ..."), `sample.rs` (`GUNMETAL_SAMPLE=1` profiler; `=54000` starts it after 54 s), `video.rs` (the Video
 menu offers every display mode, not only up to 1600x1200; the monitor and the game's 4:3 picture are
 the back buffer's own shape: Hor+ widescreen in missions, the 4:3 menus in the middle), `crash.rs`
@@ -132,7 +133,9 @@ line per picture, 2 s summaries, findings for the tick on a second thread at the
 frame rate: missions are uncapped with 40 ms logic ticks; the camera, model nodes, particles,
 trails, the zoom (the projection's fov), target markers and the crosshair's aim point are drawn
 interpolated (the crosshair's per-frame half step made one of time) between the last two ticks (by the host's clock when
-the frame draws), registry `Smooth` = 0 turns it off;
+the frame draws), registry `Smooth` = 0 turns it off; an address drawn with many places (grass, units
+through one node, ~1500 in a battle) finds each place's partner through grids, `fps::Grid`: walking
+the lists made a battle's frames quadratic;
 `GUNMETAL_STEPS=1` logs where the step is asked outside ticks). MessageBoxA is the host's, over our
 window (scripted runs, `GUNMETAL_INPUT`, answer it at once with its first button). Imports without
 an implementation stop the run with "import X is not implemented yet" when called (listed at start:
@@ -289,7 +292,9 @@ hold, raw motion summed per tick or 50 ms as `motion@dx,dy`, `wheel@n`, focus, c
 mark comment and `file.txt.<ms>.png`),
 `GUNMETAL_D3D_THREAD=0` (Direct3D on the game's thread), `GUNMETAL_WINDOW=WxH`, `GUNMETAL_MONITOR=n`, `GUNMETAL_WATCH` (where the game is, every 2 s),
 `GUNMETAL_PROF`, `GUNMETAL_SAMPLE`, `GUNMETAL_STEPS`, `GUNMETAL_TRACE_ROUTER`, `GUNMETAL_TRACE_LIFE`, `GUNMETAL_NO_MF` (music off),
-`GUNMETAL_COUNT=<file>`, `GUNMETAL_FRAMES=<file>` (per picture: Present time, interval, time to
+`GUNMETAL_COUNT=<file>` (per function and second: calls and executed guest instructions; the code
+is compiled with counters, not cached; `scripts/counts.py` compares two phases), `GUNMETAL_FRAMES=<file>` (every 2 s also
+the imports called most per picture; per picture: Present time, interval, time to
 produce it, ticks and their time, and where the main thread's time went: imports, the slowest one,
 waits for the turn and who held it, page faults, CPU time; summaries every 2 s and at ExitProcess;
 at the exit the imports called inside ticks and time per tick part; with `GUNMETAL_FRAMES_PAGES=1`
@@ -313,6 +318,12 @@ GetWriteWatch costs and the committed size; either TICK variable adds `ticks::HO
 cache key), `GUNMETAL_SHOT=shot/x.png` (the back buffer before Present, at most every
 `GUNMETAL_SHOT_MS`, 500, only between `GUNMETAL_SHOT_WINDOW=<from>-<to>` ms if set; `{t}` in the name: ms since start; `shot/` is git-ignored: game imagery is
 never committed).
+
+Measuring: a recording (`GUNMETAL_RECORD`, `scripts/look.ps1 <name>` for the user: deletes the saves,
+records with sampler and frame log) replayed by `scripts/replay.sh <run> [VAR=value ..]` (`REC=look`: the
+base against looking away, `REC=anim`: a battle against quiet; ms per picture in both windows): one run
+per change, no series. For `GUNMETAL_COUNT` the menu part of a recording needs its times stretched
+(counting slows the menus): `scripts/stretch.sh in.txt > out.txt`.
 
 Tools: `cargo run --release --example functions -- game_files [--gaps]` (find + compile,
 statistics), `examples/dis.rs <folder> <addr|all>`, `examples/ghidra.rs <folder> [json]`
