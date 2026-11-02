@@ -214,8 +214,7 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
         key): arithmetic keeps the double result, stores to floats round to nearest. Replays:
         base 3.81 -> 3.00 ms, looking away 3.91 -> 3.18 ms (-20 %, all x87 code at once). The
         picture looked right in a screenshot; to be confirmed by playing.
-      - Next: play it (anything odd in flight, aiming, particles); then measure again for the
-        next hot spots.
+      - Next: measure again for the next hot spots.
       The tick thread (below) is on hold: it adds work and race hunting for a few percent.
 - [ ] Performance, 2026-10-31 (the user: 150 fps that swing are not acceptable; aim: steady
       several hundred fps). Order now: the recompiler's code first (it speeds the tick and the
