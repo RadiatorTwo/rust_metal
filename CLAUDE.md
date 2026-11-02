@@ -290,7 +290,7 @@ them from a file, `#` comments), `GUNMETAL_RECORD=file.txt` (`record.rs`: the pl
 such items, ms outside missions and mission ticks in them: keys and mouse buttons with their
 hold, raw motion summed per tick or 50 ms as `motion@dx,dy`, `wheel@n`, focus, close; F11 writes a
 mark comment and `file.txt.<ms>.png`),
-`GUNMETAL_D3D_THREAD=0` (Direct3D on the game's thread), `GUNMETAL_WINDOW=WxH`, `GUNMETAL_MONITOR=n`, `GUNMETAL_WATCH` (where the game is, every 2 s),
+`GUNMETAL_D3D_THREAD=0` (Direct3D on the game's thread), `GUNMETAL_X87_EXACT=1` (registry `X87Exact`: x87 results rounded as the original's FPU, 24-bit precision in missions; off: doubles kept, ~20 % faster pictures), `GUNMETAL_WINDOW=WxH`, `GUNMETAL_MONITOR=n`, `GUNMETAL_WATCH` (where the game is, every 2 s),
 `GUNMETAL_PROF`, `GUNMETAL_SAMPLE` (`GUNMETAL_SAMPLE_LINES=1`: our code by source line, with a build made with `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`), `GUNMETAL_STEPS`, `GUNMETAL_TRACE_ROUTER`, `GUNMETAL_TRACE_LIFE`, `GUNMETAL_NO_MF` (music off),
 `GUNMETAL_COUNT=<file>` (per function and second: calls and executed guest instructions; the code
 is compiled with counters, not cached; `scripts/counts.py` compares two phases), `GUNMETAL_FRAMES=<file>` (every 2 s also

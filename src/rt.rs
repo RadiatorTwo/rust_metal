@@ -117,6 +117,18 @@ pub fn set_marking(on: bool) {
     MARKING.store(on, std::sync::atomic::Ordering::Relaxed)
 }
 
+static X87_EXACT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether generated x87 arithmetic rounds each result as the control word says (precision
+/// and rounding mode, as the original's FPU) instead of keeping the double (set before
+/// compiling; part of the compiled code's cache key).
+pub fn x87_exact() -> bool {
+    X87_EXACT.load(std::sync::atomic::Ordering::Relaxed)
+}
+pub fn set_x87_exact(on: bool) {
+    X87_EXACT.store(on, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Mark guest bytes [a, a + n) as written in the page map of the memory whose guest address
 /// 0 is at `base`.
 pub fn mark(base: *mut u8, a: u32, n: usize) {

@@ -153,6 +153,8 @@ fn round_ref(x: f64, rc: u16, bits: u32) -> i64 {
 
 #[test]
 fn x87() {
+    // the FPU's rounding as the original's (the game runs without it by default)
+    rust_metal::rt::set_x87_exact(true);
     let g = Guest::new(&SNIPPETS);
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
     let m = &g.mem;

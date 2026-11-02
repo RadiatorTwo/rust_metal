@@ -1018,6 +1018,18 @@ fn find_import(dll: &str, name: &str) -> Option<&'static Import> {
     table.iter().find(|i| i.0 == name)
 }
 
+/// Whether x87 arithmetic rounds as the original's FPU (`rt::x87_exact`): `GUNMETAL_X87_EXACT=1`
+/// or registry `X87Exact` = 1. Off by default: faster, and the game's floats come out the same
+/// but for the last bit now and then.
+pub fn x87_exact(dir: &Path) -> bool {
+    let v = std::env::var("GUNMETAL_X87_EXACT").ok().or_else(|| {
+        set_game_dir(dir);
+        let (_, d) = advapi32::value("", "X87Exact")?;
+        Some(u32::from_le_bytes(d.get(..4)?.try_into().ok()?).to_string())
+    });
+    v.as_deref() == Some("1")
+}
+
 /// The hooks of this run: `HOOKS`, and with `GUNMETAL_TRACE_LIFE` set also the game's life
 /// trace (`crash::LIFE_HOOKS`), with `GUNMETAL_TICK_PRINT` or `GUNMETAL_TICK_PROBE` the tick
 /// aids' (`ticks::HOOKS`). The compiled code depends on the set (main.rs keys its cache

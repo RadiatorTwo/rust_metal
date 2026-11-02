@@ -206,7 +206,16 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
         3.64/3.71 ms, looking away 3.97 -> 3.85/4.00: noise; not worth the risk.
         Also seen: two replays of the same build differ from mission tick 184 (units), so
         tick fingerprints of `look.txt` cannot check a change.
-      - Next: particles_draw 0x543b90 (6 %).
+      - particles_draw 0x543b90 (6 %) looked at: ~800 x86 instructions, nearly all x87; its
+        generated code is ~21 host instructions per guest one, mostly the 24-bit rounding
+        checks after every operation. So instead of porting it:
+      - x87 without the original's rounding (`rt::x87_exact`, off by default;
+        `GUNMETAL_X87_EXACT=1` or registry `X87Exact` = 1 brings it back, part of the cache
+        key): arithmetic keeps the double result, stores to floats round to nearest. Replays:
+        base 3.81 -> 3.00 ms, looking away 3.91 -> 3.18 ms (-20 %, all x87 code at once). The
+        picture looked right in a screenshot; to be confirmed by playing.
+      - Next: play it (anything odd in flight, aiming, particles); then measure again for the
+        next hot spots.
       The tick thread (below) is on hold: it adds work and race hunting for a few percent.
 - [ ] Performance, 2026-10-31 (the user: 150 fps that swing are not acceptable; aim: steady
       several hundred fps). Order now: the recompiler's code first (it speeds the tick and the

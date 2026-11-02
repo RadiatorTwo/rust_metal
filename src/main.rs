@@ -43,6 +43,7 @@ fn run() -> i32 {
     let cache = dir.join("compiled.bin");
     // the tick thread needs the pages generated code writes (rt::marking) and its hooks
     rust_metal::rt::set_marking(rust_metal::platform::world::mode(&dir) != rust_metal::platform::world::Mode::Off);
+    rust_metal::rt::set_x87_exact(rust_metal::platform::x87_exact(&dir));
     let hooks = rust_metal::platform::hooks();
     let key = cache_key(&game, &hooks);
     let compiled = compile_cached(&prog, &smc, &mut code, &hooks, key.map(|k| (cache.as_path(), k)));
@@ -74,6 +75,6 @@ fn cache_key(game: &Game, hooks: &[(u32, rust_metal::rt::Hook)]) -> Option<[u8; 
     for (a, _) in hooks {
         h.update(a.to_le_bytes());
     }
-    h.update([rust_metal::rt::marking() as u8]);
+    h.update([rust_metal::rt::marking() as u8, rust_metal::rt::x87_exact() as u8]);
     Some(h.finalize().into())
 }

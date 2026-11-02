@@ -253,6 +253,10 @@ impl Lifter<'_, '_> {
     /// are doubles, unless it falls on such a midpoint or outside the float's normal range
     /// (the FPU keeps its wider exponent). Those and anything else (24 bits truncating, ...)
     /// go to `rt_fpu_round`.
+    ///
+    /// Unless `rt::x87_exact`: the double result as it is, whatever the control word says (a
+    /// mission runs at 24 bits; the checks above cost ~11 % of the frame rate). Values still
+    /// become floats where the game stores them as floats.
     fn arith(&mut self, op: FpuOp, x: Value, y: Value) -> Value {
         let fast = match op {
             FpuOp::Add => self.b.ins().fadd(x, y),
@@ -263,6 +267,9 @@ impl Lifter<'_, '_> {
             FpuOp::Round => self.b.ins().fdemote(F32, x),
         };
         let fast = if matches!(op, FpuOp::Round) { self.b.ins().fpromote(F64, fast) } else { fast };
+        if !crate::rt::x87_exact() {
+            return fast;
+        }
         let cw =self.b.ins().load(I16, mf(), self.cpu, offset_of!(Cpu, fcw) as i32);
         let cw = self.b.ins().uextend(I32, cw);
         // rounding control 00 (to nearest) and precision control 1x (53 or 64 bits)
@@ -417,8 +424,9 @@ impl Lifter<'_, '_> {
                 } else if mem0 {
                     let v = self.st(0);
                     let v = if i.memory_size() == MemorySize::Float32 {
-                        // rounded to a float as the control word says
-                        let v = self.arith(FpuOp::Round, v, v);
+                        // rounded to a float as the control word says (`rt::x87_exact`), else
+                        // to nearest
+                        let v = if crate::rt::x87_exact() { self.arith(FpuOp::Round, v, v) } else { v };
                         self.b.ins().fdemote(F32, v)
                     } else {
                         v
