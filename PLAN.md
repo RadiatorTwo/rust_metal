@@ -183,7 +183,17 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
         other opcodes or a bad stack depth run the original. Sampler: 4-5 % -> gone, rt_hook
         1.7 % new (the hook's entry costs, also for the empty calls). Pictures against
         `GUNMETAL_NATIVE=0`: the same.
-      - Next: 0x47cb30 (~6 %); flags stored before indirect calls only where read.
+      - New recording `look.txt` (2026-11-02, mission from 27 s; the old one no longer reached
+        the mission). Sampler averages there: particles_draw 6.3 %, `rt_string` 3.9 %, 0x47cb30
+        3.5 % (at most ~0.1 ms a picture even if free: left for later), 0x50d890 3.4 %.
+      - movs/stos inline (`lift.rs` `string_move`, test `tests/strings.rs`): forward, with at
+        most 64 elements, an element at a time in generated code instead of `rt_string` (whose
+        call stores and reloads every register and flag; the game copies 16-dword matrices
+        with `rep movsd`). `rt_string` 3.9 -> 1.8 %, base 3.67 -> 3.64 ms, looking away 3.76
+        -> 3.72 ms (one run each). The rest: long copies, lods/scas/cmps or backwards, not
+        looked at.
+      - Next: the sampler's "init_tib" (4.1 %; it does not run in a mission: some host code of
+        ours under the wrong symbol); flags stored before indirect calls only where read.
       The tick thread (below) is on hold: it adds work and race hunting for a few percent.
 - [ ] Performance, 2026-10-31 (the user: 150 fps that swing are not acceptable; aim: steady
       several hundred fps). Order now: the recompiler's code first (it speeds the tick and the

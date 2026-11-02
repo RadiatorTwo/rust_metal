@@ -1177,10 +1177,73 @@ impl<'a, 'f> Lifter<'a, 'f> {
                     _ => panic!("{m:?} passed the support check but has no lifting"),
                 };
                 let rep = if i.has_repne_prefix() { 2 } else if i.has_rep_prefix() || i.has_repe_prefix() { 1 } else { 0 };
-                self.helper(self.refs.string, Some(kind | size << 4 | rep << 8));
+                if kind <= 1 {
+                    self.string_move(kind, size, rep != 0);
+                } else {
+                    self.helper(self.refs.string, Some(kind | size << 4 | rep << 8));
+                }
             }
         }
         false
+    }
+
+    /// movs (`kind` 0) and stos (1), with or without rep: forwards and with at most
+    /// `INLINE_REP` elements an element at a time in generated code (as the CPU does it, so an
+    /// overlapping copy gives what it gives there), else through `rt::rt_string`. The helper
+    /// call stores and reloads every register and flag; the game's copies are mostly 16 dwords
+    /// (matrices).
+    fn string_move(&mut self, kind: i64, size: i64, rep: bool) {
+        const INLINE_REP: i64 = 64;
+        let df = self.b.ins().load(I8, mf(), self.cpu, offset_of!(Cpu, df) as i32);
+        let mut slow = self.b.ins().icmp_imm_u(IntCC::NotEqual, df, 0);
+        if rep {
+            let n = self.reg(1);
+            let big = self.b.ins().icmp_imm_u(IntCC::UnsignedGreaterThan, n, INLINE_REP);
+            slow = self.b.ins().bor(slow, big);
+        }
+        let (helper, fast, done) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(slow, helper, &[], fast, &[]);
+        self.b.switch_to_block(helper);
+        self.helper(self.refs.string, Some(kind | size << 4 | (rep as i64) << 8));
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(fast);
+        let body = if rep {
+            let (head, body) = (self.b.create_block(), self.b.create_block());
+            self.b.ins().jump(head, &[]);
+            self.b.switch_to_block(head);
+            let n = self.reg(1);
+            self.b.ins().brif(n, body, &[], done, &[]);
+            self.b.switch_to_block(body);
+            Some(head)
+        } else {
+            None
+        };
+        let di = self.reg(7);
+        let v = if kind == 0 {
+            let si = self.reg(6);
+            let v = self.load(si, size as u32);
+            let si = self.b.ins().iadd_imm_s(si, size);
+            self.set_reg(6, si);
+            v
+        } else {
+            let a = self.reg(0);
+            if size == 4 { a } else { self.b.ins().ireduce(ty(size as u32), a) }
+        };
+        self.store(di, v);
+        let di = self.b.ins().iadd_imm_s(di, size);
+        self.set_reg(7, di);
+        match body {
+            Some(head) => {
+                let n = self.reg(1);
+                let n = self.b.ins().iadd_imm_s(n, -1);
+                self.set_reg(1, n);
+                self.b.ins().jump(head, &[]);
+            }
+            None => {
+                self.b.ins().jump(done, &[]);
+            }
+        }
+        self.b.switch_to_block(done);
     }
 
     /// movd/movq between MMX registers (`Cpu::mm`), general registers and memory.
