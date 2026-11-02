@@ -200,7 +200,13 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
         our code by source line (needs a build with
         `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`); left there: the interpolation's grid
         search (`fps.rs` `any`, ~1 %).
-      - Next: flags stored before indirect calls only where read; particles_draw (6 %).
+      - Tried and dropped: no flags stored at indirect calls and jumps (the 21 entries that
+        read flags at entry are all reached directly or are numbers from data; they were left
+        out of `rt::Direct` so that a wrong guess would stop the run). Replays: base 3.66 ->
+        3.64/3.71 ms, looking away 3.97 -> 3.85/4.00: noise; not worth the risk.
+        Also seen: two replays of the same build differ from mission tick 184 (units), so
+        tick fingerprints of `look.txt` cannot check a change.
+      - Next: particles_draw 0x543b90 (6 %).
       The tick thread (below) is on hold: it adds work and race hunting for a few percent.
 - [ ] Performance, 2026-10-31 (the user: 150 fps that swing are not acceptable; aim: steady
       several hundred fps). Order now: the recompiler's code first (it speeds the tick and the
