@@ -1179,6 +1179,8 @@ impl<'a, 'f> Lifter<'a, 'f> {
                 let rep = if i.has_repne_prefix() { 2 } else if i.has_rep_prefix() || i.has_repe_prefix() { 1 } else { 0 };
                 if kind <= 1 {
                     self.string_move(kind, size, rep != 0);
+                } else if kind == 3 && size == 1 && rep == 2 {
+                    self.repne_scasb();
                 } else {
                     self.helper(self.refs.string, Some(kind | size << 4 | rep << 8));
                 }
@@ -1243,6 +1245,43 @@ impl<'a, 'f> Lifter<'a, 'f> {
                 self.b.ins().jump(done, &[]);
             }
         }
+        self.b.switch_to_block(done);
+    }
+
+    /// repne scasb (the C runtime's strlen and strchr, also inlined into the game's loops: one
+    /// measures a string again for each of its characters, ~40000 times a second): forwards a
+    /// byte at a time in generated code, the flags from each compare as cmp al, [edi]; with
+    /// DF set through `rt::rt_string`.
+    fn repne_scasb(&mut self) {
+        let df = self.b.ins().load(I8, mf(), self.cpu, offset_of!(Cpu, df) as i32);
+        let (helper, head, body, done) = (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(df, helper, &[], head, &[]);
+        self.b.switch_to_block(helper);
+        self.helper(self.refs.string, Some(3 | 1 << 4 | 2 << 8));
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(head);
+        let n = self.reg(1);
+        self.b.ins().brif(n, body, &[], done, &[]);
+        self.b.switch_to_block(body);
+        let di = self.reg(7);
+        let y = self.load(di, 1);
+        let di = self.b.ins().iadd_imm_s(di, 1);
+        self.set_reg(7, di);
+        let n = self.reg(1);
+        let n = self.b.ins().iadd_imm_s(n, -1);
+        self.set_reg(1, n);
+        let a = self.reg(0);
+        let x = self.b.ins().ireduce(I8, a);
+        let r = self.b.ins().isub(x, y);
+        let c = self.b.ins().icmp(IntCC::UnsignedLessThan, x, y);
+        self.set_flag(self.cf, c);
+        let (p, q) = (self.b.ins().bxor(x, y), self.b.ins().bxor(x, r));
+        let t = self.b.ins().band(p, q);
+        let o = self.msb(t);
+        self.set_flag(self.of, o);
+        self.set_zsp(r);
+        let eq = self.b.ins().icmp(IntCC::Equal, x, y);
+        self.b.ins().brif(eq, done, &[], head, &[]);
         self.b.switch_to_block(done);
     }
 

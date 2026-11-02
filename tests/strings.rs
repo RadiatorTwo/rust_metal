@@ -108,3 +108,58 @@ fn movs_and_stos() {
         }
     }
 }
+
+/// repne scasb, then the flags to the scratch's last dword
+fn repne_scasb(a: &mut CodeAssembler) -> Result<(), IcedError> {
+    args(a)?;
+    a.repne().scasb()?;
+    a.pushfd()?;
+    a.pop(edx)?;
+    a.mov(dword_ptr(SCRATCH + 0xffc), edx)?;
+    finish(a)
+}
+
+/// What the CPU does for repne scasb forwards: (edi, ecx, flags CF PF ZF SF OF)
+fn scasb_reference(mem: &[u8], mut dst: u32, mut cnt: u32, byte: u8) -> (u32, u32, Option<u32>) {
+    let mut flags = None;
+    while cnt != 0 {
+        let (x, y) = (byte as u32, mem[(dst - SCRATCH) as usize] as u32);
+        let r = x.wrapping_sub(y) & 0xff;
+        let f = (x < y) as u32 | (((r as u8).count_ones() % 2 == 0) as u32) << 2 | ((r == 0) as u32) << 6 | ((r >> 7) & 1) << 7 | ((((x ^ y) & (x ^ r)) >> 7) & 1) << 11;
+        flags = Some(f);
+        dst += 1;
+        cnt -= 1;
+        if r == 0 {
+            break;
+        }
+    }
+    (dst, cnt, flags)
+}
+
+#[test]
+fn repne_scas() {
+    let g = Guest::new(&[("repne_scasb", repne_scasb as Snippet)]);
+    let mask = 1 | 4 | 0x40 | 0x80 | 0x800;
+    // (start, count, byte): found, not found within the count, count 0, found as the last
+    // byte counted, strlen (count 0xffffffff), a byte above 0x7f
+    let s = SCRATCH + 0x100;
+    let cases = [(s, 100, 0x55u8), (s, 3, 0x55), (s, 0, 0x55), (SCRATCH + 0xf00, 0xf0, 0), (s, u32::MAX, 0), (s, 50, 0xc3)];
+    for &(dst, cnt, byte) in &cases {
+        let mut fill: Vec<u8> = (0..0x1000u32).map(|i| (i * 7 + 3) as u8 | 1).collect();
+        fill[0x140] = 0x55;
+        fill[0x110] = 0xc3;
+        fill[0xfff] = 0;
+        fill[0x180] = 0;
+        g.mem.slice(SCRATCH, 0xff0).copy_from_slice(&fill[..0xff0]);
+        // the last byte of the case at 0xf00 (below the results at the scratch's end)
+        g.mem.slice(SCRATCH + 0xfef, 1)[0] = 0;
+        let mem = g.mem.slice(SCRATCH, 0x1000).to_vec();
+        let (wdst, wcnt, wflags) = scasb_reference(&mem, dst, cnt, byte);
+        g.call(0, &[0, dst, cnt, byte as u32, 0]);
+        let what = format!("dst {dst:#x} cnt {cnt:#x} byte {byte:#x}");
+        assert_eq!((g.mem.rd32(SCRATCH + 0xff4), g.mem.rd32(SCRATCH + 0xff8)), (wdst, wcnt), "registers: {what}");
+        if let Some(f) = wflags {
+            assert_eq!(g.mem.rd32(SCRATCH + 0xffc) & mask, f, "flags: {what}");
+        }
+    }
+}

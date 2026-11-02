@@ -214,7 +214,15 @@ is built; what still needs to be confirmed by hand and by ear is listed under Do
         key): arithmetic keeps the double result, stores to floats round to nearest. Replays:
         base 3.81 -> 3.00 ms, looking away 3.91 -> 3.18 ms (-20 %, all x87 code at once). The
         picture looked right in a screenshot; the user played it: everything right.
-      - Next: measure again for the next hot spots.
+      - Measured again (sampler): 0x47cb30 5.4 %, 0x50d890 4.4 %, render_mesh 4.0 %,
+        particles_draw 3.7 %, 0x54a6c0 3.2 %, `rt_string` 2.5 %. Nearly all of `rt_string` was
+        repne scasb with ecx = -1 (strlen), ~41000 a second from one loop in 0x4f8e50 that
+        measures a string again for each character (~54 bytes each). Now inline in generated
+        code (`lift.rs` `repne_scasb`, forwards; test `tests/strings.rs`): mission 27-44 s
+        3.94 -> 3.92 ms, no measurable change (kept: small and tested).
+      - `look.txt` was replaced on 2026-11-03 by a short recording (mission ends at ~45 s):
+        `replay.sh`'s windows need a new long one.
+      - Next: a long recording; then 0x47cb30, 0x50d890, render_mesh.
       The tick thread (below) is on hold: it adds work and race hunting for a few percent.
 - [ ] Performance, 2026-10-31 (the user: 150 fps that swing are not acceptable; aim: steady
       several hundred fps). Order now: the recompiler's code first (it speeds the tick and the
